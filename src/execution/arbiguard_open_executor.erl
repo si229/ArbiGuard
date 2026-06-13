@@ -200,7 +200,18 @@ dispatch_order(Req0, Order, Op) ->
         _ ->
             ApplyResult = catch arbiguard_state:apply_open_order(Req, Order, Op),
             maybe_handoff_position_to_close(Req, ApplyResult),
-            (public_order(Order))#{status => <<"filled_paper_open">>,
+            Position = case ApplyResult of
+                Result when is_map(Result) -> maps:get(opened_position, Result, #{});
+                _ -> #{}
+            end,
+            OpenFee = maps:get(open_fee, Position, maps:get(open_fee, Op, 0.0)),
+            (public_order(Order#{confirmed_notional => maps:get(target_notional, Order, 0.0),
+                                 remaining_notional => 0.0,
+                                 long_filled_qty => maps:get(long_qty, Position, maps:get(long_target_qty, Order, 0.0)),
+                                 short_filled_qty => maps:get(short_qty, Position, maps:get(short_target_qty, Order, 0.0)),
+                                 execution_fee => OpenFee,
+                                 actual_pnl => maps:get(unrealized_pnl, Position, -OpenFee)}))#{
+                                   status => <<"filled_paper_open">>,
                                    exchange_submit => <<"skipped_paper_account">>,
                                    execution_path => <<"ws_ticker_paper_filled_no_exchange_submit">>,
                                    filled_at => arbiguard_util:now_ms()}
@@ -433,7 +444,42 @@ require_profitable(Op, Req) ->
     end.
 
 public_order(Order) ->
-    maps:without([req, opportunity], Order).
+    Target = maps:get(target_notional, Order, 0.0),
+    Status = maps:get(status, Order, <<"">>),
+    Confirmed0 = maps:get(confirmed_notional, Order, 0.0),
+    Confirmed = case {Confirmed0, filled_status(Status)} of
+        {0.0, true} -> Target;
+        {0, true} -> Target;
+        _ -> Confirmed0
+    end,
+    Pending = pending_notional(maps:get(pending_submissions, Order, #{})),
+    Remaining0 = maps:get(remaining_notional, Order, max(0.0, Target - Confirmed - Pending)),
+    Progress = case Target > 0 of
+        true -> min(100.0, max(0.0, Confirmed / Target * 100.0));
+        false -> 0.0
+    end,
+    Ratio = case Target > 0 of true -> min(1.0, max(0.0, Confirmed / Target)); false -> 0.0 end,
+    Op = maps:get(opportunity, Order, #{}),
+    OpenFee = maps:get(execution_fee, Order, maps:get(open_fee, Op, 0.0)),
+    ActualPNL = maps:get(actual_pnl, Order, case filled_status(Status) of true -> -OpenFee; false -> 0.0 end),
+    maps:without([req, opportunity],
+                 Order#{target_notional => Target,
+                        confirmed_notional => Confirmed,
+                        pending_notional => Pending,
+                        remaining_notional => Remaining0,
+                        progress_pct => Progress,
+                        long_target_notional => Target,
+                        short_target_notional => Target,
+                        long_confirmed_notional => Confirmed,
+                        short_confirmed_notional => Confirmed,
+                        long_filled_qty => maps:get(long_filled_qty, Order, maps:get(long_target_qty, Order, 0.0) * Ratio),
+                        short_filled_qty => maps:get(short_filled_qty, Order, maps:get(short_target_qty, Order, 0.0) * Ratio),
+                        execution_fee => OpenFee,
+                        actual_pnl => ActualPNL}).
+
+filled_status(<<"filled_paper_open">>) -> true;
+filled_status(<<"filled_live_open">>) -> true;
+filled_status(_) -> false.
 
 apply_live_child_update(Parent, Update) ->
     ChildID = maps:get(id, Update, <<"">>),

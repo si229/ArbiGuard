@@ -329,7 +329,7 @@ subscribe_payload(<<"gate">>, Symbol) ->
                             event => <<"subscribe">>, payload => [gate_symbol(Symbol)]});
 subscribe_payload(<<"htx">>, Symbol) ->
     Contract = htx_symbol(Symbol),
-    arbiguard_json:encode(#{sub => <<"market.", Contract/binary, ".ticker">>, id => Symbol});
+    arbiguard_json:encode(#{sub => <<"market.", Contract/binary, ".depth.step0">>, id => Symbol});
 subscribe_payload(<<"weex">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
 subscribe_payload(_, _Symbol) ->
@@ -342,7 +342,7 @@ unsubscribe_payload(<<"gate">>, Symbol) ->
                             event => <<"unsubscribe">>, payload => [gate_symbol(Symbol)]});
 unsubscribe_payload(<<"htx">>, Symbol) ->
     Contract = htx_symbol(Symbol),
-    arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".ticker">>, id => Symbol});
+    arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".depth.step0">>, id => Symbol});
 unsubscribe_payload(<<"weex">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
 unsubscribe_payload(<<"binance">>, _Symbol) ->
@@ -427,8 +427,8 @@ maybe_write_ticker(Msg, State = #state{id = <<"htx">> = ID}) ->
     Tick = map_get_any([tick, <<"tick">>], Msg, #{}),
     Ch = map_get_any([ch, <<"ch">>], Msg, <<"">>),
     Symbol = htx_symbol_from_channel(Ch),
-    Bid = side_price(map_get_any([bid, <<"bid">>], Tick, [])),
-    Ask = side_price(map_get_any([ask, <<"ask">>], Tick, [])),
+    Bid = side_price(map_get_any([bid, bids, <<"bid">>, <<"bids">>], Tick, [])),
+    Ask = side_price(map_get_any([ask, asks, <<"ask">>, <<"asks">>], Tick, [])),
     Last = arbiguard_util:to_float(map_get_any([close, <<"close">>], Tick, 0), 0),
     Mark = arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Tick, 0), 0),
     case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, Last, Mark, <<"ws_ticker">>, State) end;
@@ -508,9 +508,14 @@ htx_symbol_from_channel(Ch0) ->
     Parts = binary:split(Ch, <<".">>, [global]),
     case Parts of
         [<<"market">>, Contract, <<"ticker">>] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
+        [<<"market">>, Contract, <<"depth">>, _Step] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
+        [<<"market">>, Contract, <<"bbo">>] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
+        [<<"market">>, Contract, <<"detail">>] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
         _ -> <<"">>
     end.
 
+side_price([[Price | _] | _]) ->
+    arbiguard_util:to_float(Price, 0);
 side_price([Price | _]) ->
     arbiguard_util:to_float(Price, 0);
 side_price(Value) ->
