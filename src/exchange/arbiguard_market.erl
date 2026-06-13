@@ -24,7 +24,7 @@ fetch_binance(Exchange) ->
 
 binance_row(Exchange, I) ->
     Symbol = normalize_symbol(maps:get(symbol, I, <<"">>)),
-    #{exchange => <<"binance">>,
+    with_exchange_limits(#{exchange => <<"binance">>,
       exchange_name => maps:get(name, Exchange, <<"Binance">>),
       symbol => Symbol,
       raw_symbol => maps:get(symbol, I, <<"">>),
@@ -36,7 +36,7 @@ binance_row(Exchange, I) ->
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
       quote_volume => 0,
-      updated_at => arbiguard_util:now_ms()}.
+      updated_at => arbiguard_util:now_ms()}, Exchange).
 
 fetch_gate(Exchange) ->
     Base = trim_right(maps:get(base_url, Exchange, <<"https://api.gateio.ws/api/v4">>)),
@@ -49,7 +49,7 @@ fetch_gate(Exchange) ->
 
 gate_row(Exchange, I) ->
     Raw = maps:get(name, I, maps:get(contract, I, <<"">>)),
-    #{exchange => <<"gate">>,
+    with_exchange_limits(#{exchange => <<"gate">>,
       exchange_name => maps:get(name, Exchange, <<"Gate.io">>),
       symbol => normalize_symbol(Raw),
       raw_symbol => Raw,
@@ -62,7 +62,7 @@ gate_row(Exchange, I) ->
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
       quote_volume => f(maps:get(volume_24h_quote, I, maps:get(volume_24h_settle, I, 0)), 0),
       delist_time => arbiguard_util:to_int(maps:get(delisting_time, I, 0), 0) * 1000,
-      updated_at => arbiguard_util:now_ms()}.
+      updated_at => arbiguard_util:now_ms()}, Exchange).
 
 fetch_okx(Exchange) ->
     Base = trim_right(maps:get(base_url, Exchange, <<"https://www.okx.com">>)),
@@ -93,7 +93,7 @@ okx_row(Exchange, Base, I) ->
     NextFunding = arbiguard_util:to_int(maps:get(nextFundingTime, Funding, FundingTime), 0),
     PrevFunding = arbiguard_util:to_int(maps:get(prevFundingTime, Funding, 0), 0),
     Interval = interval_hours(FundingTime, NextFunding, interval_hours(PrevFunding, FundingTime, f(maps:get(funding_interval_hours, Exchange, 8), 8))),
-    #{exchange => <<"okx">>,
+    with_exchange_limits(#{exchange => <<"okx">>,
       exchange_name => maps:get(name, Exchange, <<"OKX">>),
       symbol => normalize_symbol(Raw),
       raw_symbol => Raw,
@@ -105,7 +105,7 @@ okx_row(Exchange, Base, I) ->
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
       quote_volume => f(maps:get(volCcy24h, I, maps:get(vol24h, I, 0)), 0),
-      updated_at => arbiguard_util:now_ms()}.
+      updated_at => arbiguard_util:now_ms()}, Exchange).
 
 okx_funding(Base, Raw) ->
     case http_json(<<Base/binary, "/api/v5/public/funding-rate?instId=", Raw/binary>>) of
@@ -149,7 +149,7 @@ htx_row(Exchange, I, Contracts, Prices) ->
     Interval0 = f(maps:get(funding_interval, I, maps:get(funding_interval_hours, I, maps:get(funding_interval_hours, Exchange, 8))), 8),
     Interval = interval_hours(CurrentFunding, NextFunding, Interval0),
     Tradable = htx_tradable(Contract),
-    #{exchange => <<"htx">>,
+    with_exchange_limits(#{exchange => <<"htx">>,
       exchange_name => maps:get(name, Exchange, <<"HTX">>),
       symbol => case Tradable of true -> Symbol; false -> <<"">> end,
       raw_symbol => Raw,
@@ -162,7 +162,7 @@ htx_row(Exchange, I, Contracts, Prices) ->
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
       quote_volume => f(maps:get(amount, Price, maps:get(vol, Price, 0)), 0),
       delist_time => delist_time(Contract),
-      updated_at => arbiguard_util:now_ms()}.
+      updated_at => arbiguard_util:now_ms()}, Exchange).
 
 fetch_weex(Exchange) ->
     Base = trim_right(maps:get(base_url, Exchange, <<"https://api-contract.weex.com">>)),
@@ -186,7 +186,7 @@ weex_row(Exchange, T, Premiums) ->
     CycleMinutes = f(maps:get(collectCycle, Premium, 0), 0),
     Interval0 = case CycleMinutes > 0 of true -> CycleMinutes / 60; false -> f(maps:get(funding_interval_hours, Exchange, 8), 8) end,
     Interval = interval_hours(CurrentFunding, NextFunding, Interval0),
-    #{exchange => <<"weex">>,
+    with_exchange_limits(#{exchange => <<"weex">>,
       exchange_name => maps:get(name, Exchange, <<"WEEX">>),
       symbol => Symbol,
       raw_symbol => Raw,
@@ -199,7 +199,7 @@ weex_row(Exchange, T, Premiums) ->
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0006), 0.0006),
       quote_volume => f(maps:get(quoteVolume, T, maps:get(volume, T, 0)), 0),
       delist_time => positive_int(delist_time(T), delist_time(Premium)),
-      updated_at => arbiguard_util:now_ms()}.
+      updated_at => arbiguard_util:now_ms()}, Exchange).
 
 http_json(UrlBin) ->
     Url = binary_to_list(UrlBin),
@@ -227,6 +227,10 @@ trim_right(Bin) ->
 
 f(V, D) ->
     arbiguard_util:to_float(V, D).
+
+with_exchange_limits(Row, Exchange) ->
+    Row#{max_single_order_usdt => f(maps:get(max_single_order_usdt, Exchange, 0), 0),
+         max_total_position_usdt => f(maps:get(max_total_position_usdt, Exchange, 0), 0)}.
 
 is_okx_usdt_swap(Raw) ->
     B = string:uppercase(arbiguard_util:to_binary(Raw)),

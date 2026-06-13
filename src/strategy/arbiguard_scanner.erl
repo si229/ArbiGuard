@@ -144,6 +144,8 @@ normalize_row(Row) ->
         funding_interval_hours => arbiguard_util:to_float(maps:get(funding_interval_hours, Row, 8), 8),
         taker_fee_rate => arbiguard_util:to_float(maps:get(taker_fee_rate, Row, 0.0005), 0.0005),
         maker_fee_rate => arbiguard_util:to_float(maps:get(maker_fee_rate, Row, 0.0002), 0.0002),
+        max_single_order_usdt => arbiguard_util:to_float(maps:get(max_single_order_usdt, Row, 0), 0),
+        max_total_position_usdt => arbiguard_util:to_float(maps:get(max_total_position_usdt, Row, 0), 0),
         quote_volume => arbiguard_util:to_float(maps:get(quote_volume, Row, 0), 0),
         delist_time => arbiguard_util:to_int(maps:get(delist_time, Row, 0), 0)
     }.
