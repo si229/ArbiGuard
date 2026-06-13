@@ -1,7 +1,7 @@
 -module(arbiguard_exchange_ticker).
 -behaviour(gen_server).
 
--export([start_link/1, start_ws/1, subscribe/3, unsubscribe/3, upsert_ticker/2, snapshot/1, name/1]).
+-export([start_link/1, start_ws/1, set_ws_endpoint/4, subscribe/3, unsubscribe/3, upsert_ticker/2, snapshot/1, name/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {exchange, id, subscriptions = #{}, ws_enabled = false,
@@ -14,6 +14,9 @@ start_link(Exchange) ->
 
 start_ws(ExchangeID) ->
     gen_server:call(name(ExchangeID), start_ws).
+
+set_ws_endpoint(ExchangeID, Host, Port, Path) ->
+    gen_server:call(name(ExchangeID), {set_ws_endpoint, Host, Port, Path}).
 
 subscribe(ExchangeID, Symbol, Reason) ->
     gen_server:call(name(ExchangeID), {subscribe, Symbol, Reason}).
@@ -40,6 +43,21 @@ init([Exchange]) ->
 
 handle_call(start_ws, _From, State) ->
     {reply, ok, do_start_ws(State)};
+handle_call({set_ws_endpoint, Host0, Port0, Path0}, _From, State) ->
+    Host = arbiguard_util:to_binary(Host0),
+    Port = arbiguard_util:to_int(Port0, 443),
+    Path = ensure_path(arbiguard_util:to_binary(Path0)),
+    Exchange = State#state.exchange#{ws_host => Host, ws_port => Port, ws_path => Path},
+    lager:warning("ticker ws endpoint updated exchange=~s host=~s port=~p path=~s",
+                  [State#state.id, Host, Port, Path]),
+    NewState0 = close_ws(State#state{exchange = Exchange,
+                                     ws_connected = false,
+                                     ws_status = <<"endpoint_updated">>,
+                                     ws_error = undefined,
+                                     ws_conn = undefined,
+                                     ws_stream = undefined}),
+    {reply, #{ok => true, exchange => State#state.id, ws_host => Host, ws_port => Port, ws_path => Path},
+     do_start_ws(NewState0)};
 handle_call({subscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
     lager:info("ticker subscribe exchange=~s symbol=~s reason=~p", [State#state.id, Symbol, Reason]),
@@ -75,7 +93,7 @@ handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
     handle_ws_payload(Data, State),
     {noreply, State};
 handle_info({gun_ws, _ConnPid, _StreamRef, {binary, Data}}, State) ->
-    handle_ws_payload(Data, State),
+    handle_ws_payload(maybe_gunzip(Data), State),
     {noreply, State};
 handle_info({gun_down, ConnPid, _Proto, Reason, _KilledStreams}, State = #state{ws_conn = ConnPid}) ->
     lager:warning("ticker ws down exchange=~s reason=~p", [State#state.id, Reason]),
@@ -98,7 +116,7 @@ code_change(_OldVsn, State, _Extra) ->
 do_start_ws(State = #state{ws_enabled = true, ws_connected = true}) ->
     State;
 do_start_ws(State) ->
-    case ws_endpoint(State#state.id) of
+    case ws_endpoint(State) of
         {ok, Host, Port, Path} ->
             connect_ws(State, Host, Port, Path);
         {error, Reason} ->
@@ -142,6 +160,12 @@ reconnect(State, Reason) ->
     State#state{ws_enabled = true, ws_connected = false, ws_status = <<"reconnecting">>, ws_error = Reason,
                 ws_conn = undefined, ws_stream = undefined}.
 
+close_ws(State = #state{ws_conn = undefined}) ->
+    State;
+close_ws(State = #state{ws_conn = ConnPid}) ->
+    catch gun:close(ConnPid),
+    State.
+
 replay_subscriptions(State = #state{id = <<"binance">>}) ->
     State;
 replay_subscriptions(State = #state{subscriptions = Subs}) ->
@@ -167,12 +191,14 @@ maybe_ws_unsubscribe(State = #state{ws_connected = true, ws_conn = ConnPid, ws_s
 maybe_ws_unsubscribe(State, _Symbol) ->
     State.
 
-ws_endpoint(<<"binance">>) -> {ok, <<"fstream.binance.com">>, 443, <<"/ws/!bookTicker">>};
-ws_endpoint(<<"okx">>) -> {ok, <<"ws.okx.com">>, 8443, <<"/ws/v5/public">>};
-ws_endpoint(<<"gate">>) -> {ok, <<"fx-ws.gateio.ws">>, 443, <<"/v4/ws/usdt">>};
-ws_endpoint(<<"htx">>) -> {ok, <<"api.hbdm.com">>, 443, <<"/linear-swap-ws">>};
-ws_endpoint(<<"weex">>) -> {ok, <<"wspap.weex.com">>, 443, <<"/v2/ws/public">>};
-ws_endpoint(_) -> {error, <<"websocket_endpoint_not_configured">>}.
+ws_endpoint(#state{exchange = Exchange}) ->
+    Host = maps:get(ws_host, Exchange, <<"">>),
+    Port = arbiguard_util:to_int(maps:get(ws_port, Exchange, 443), 443),
+    Path = ensure_path(maps:get(ws_path, Exchange, <<"/">>)),
+    case Host =/= <<"">> andalso Port > 0 of
+        true -> {ok, Host, Port, Path};
+        false -> {error, <<"websocket_endpoint_not_configured">>}
+    end.
 
 subscribe_payload(<<"okx">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{channel => <<"tickers">>, instId => okx_symbol(Symbol)}]});
@@ -197,7 +223,9 @@ unsubscribe_payload(_, _Symbol) ->
 
 handle_ws_payload(Data, State) ->
     case decode_ws(Data) of
-        {ok, Msg} -> maybe_write_ticker(Msg, State);
+        {ok, Msg} ->
+            maybe_reply_ws(Msg, State),
+            maybe_write_ticker(Msg, State);
         _ -> ok
     end.
 
@@ -206,22 +234,59 @@ decode_ws(Data) ->
     catch _:_ -> error
     end.
 
+maybe_reply_ws(Msg, #state{id = <<"htx">>, ws_conn = ConnPid, ws_stream = StreamRef})
+        when ConnPid =/= undefined, StreamRef =/= undefined ->
+    case map_get_any([ping], Msg, undefined) of
+        undefined -> ok;
+        Ping -> catch gun:ws_send(ConnPid, StreamRef, {text, arbiguard_json:encode(#{pong => Ping})})
+    end;
+maybe_reply_ws(_Msg, _State) ->
+    ok.
+
 maybe_write_ticker(Msg, #state{id = <<"binance">> = ID}) ->
-    case maps:get(<<"s">>, Msg, maps:get(s, Msg, undefined)) of
+    case map_get_any([s, <<"s">>], Msg, undefined) of
         undefined -> ok;
         Symbol ->
-            Bid = arbiguard_util:to_float(maps:get(<<"b">>, Msg, maps:get(b, Msg, 0)), 0),
-            Ask = arbiguard_util:to_float(maps:get(<<"a">>, Msg, maps:get(a, Msg, 0)), 0),
+            Bid = arbiguard_util:to_float(map_get_any([b, <<"b">>], Msg, 0), 0),
+            Ask = arbiguard_util:to_float(map_get_any([a, <<"a">>], Msg, 0), 0),
             write_ticker(ID, Symbol, Bid, Ask, 0)
     end;
 maybe_write_ticker(Msg, #state{id = <<"okx">> = ID}) ->
-    Data = maps:get(<<"data">>, Msg, maps:get(data, Msg, [])),
+    Data = map_get_any([data, <<"data">>], Msg, []),
     [write_ticker(ID,
-                  undo_okx_symbol(maps:get(<<"instId">>, Row, maps:get(instId, Row, <<"">>))),
-                  arbiguard_util:to_float(maps:get(<<"bidPx">>, Row, maps:get(bidPx, Row, 0)), 0),
-                  arbiguard_util:to_float(maps:get(<<"askPx">>, Row, maps:get(askPx, Row, 0)), 0),
-                  arbiguard_util:to_float(maps:get(<<"last">>, Row, maps:get(last, Row, 0)), 0))
+                  undo_okx_symbol(map_get_any([instId, <<"instId">>], Row, <<"">>)),
+                  arbiguard_util:to_float(map_get_any([bidPx, <<"bidPx">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([askPx, <<"askPx">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([last, <<"last">>], Row, 0), 0))
      || Row <- Data],
+    ok;
+maybe_write_ticker(Msg, #state{id = <<"gate">> = ID}) ->
+    Rows0 = map_get_any([result, <<"result">>], Msg, []),
+    Rows = case is_list(Rows0) of true -> Rows0; false -> [Rows0] end,
+    [write_ticker(ID,
+                  undo_gate_symbol(map_get_any([contract, <<"contract">>], Row, <<"">>)),
+                  arbiguard_util:to_float(map_get_any([highest_bid, bid1, <<"highest_bid">>, <<"bid1">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([lowest_ask, ask1, <<"lowest_ask">>, <<"ask1">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([last, mark_price, <<"last">>, <<"mark_price">>], Row, 0), 0))
+     || Row <- Rows],
+    ok;
+maybe_write_ticker(Msg, #state{id = <<"htx">> = ID}) ->
+    Tick = map_get_any([tick, <<"tick">>], Msg, #{}),
+    Ch = map_get_any([ch, <<"ch">>], Msg, <<"">>),
+    Symbol = htx_symbol_from_channel(Ch),
+    Bid = side_price(map_get_any([bid, <<"bid">>], Tick, [])),
+    Ask = side_price(map_get_any([ask, <<"ask">>], Tick, [])),
+    Last = arbiguard_util:to_float(map_get_any([close, <<"close">>], Tick, 0), 0),
+    case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, Last) end;
+maybe_write_ticker(Msg, #state{id = <<"weex">> = ID}) ->
+    Rows0 = map_get_any([data, <<"data">>], Msg, []),
+    Rows = case is_list(Rows0) of true -> Rows0; false -> [Rows0] end,
+    [write_ticker(ID,
+                  map_get_any([symbol, instId, <<"symbol">>, <<"instId">>], Row, <<"">>),
+                  arbiguard_util:to_float(map_get_any([bidPr, bid, bidPx, bestBid, <<"bidPr">>, <<"bid">>, <<"bidPx">>, <<"bestBid">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([askPr, ask, askPx, bestAsk, <<"askPr">>, <<"ask">>, <<"askPx">>, <<"bestAsk">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([lastPr, last, lastPrice, <<"lastPr">>, <<"last">>, <<"lastPrice">>], Row, 0), 0))
+     || Row <- Rows],
     ok;
 maybe_write_ticker(_Msg, _State) ->
     ok.
@@ -243,6 +308,38 @@ gate_symbol(Symbol) ->
 
 htx_symbol(Symbol) ->
     binary:replace(norm_symbol(Symbol), <<"USDT">>, <<"-USDT">>).
+
+undo_gate_symbol(Symbol) ->
+    binary:replace(norm_symbol(Symbol), <<"_">>, <<>>, [global]).
+
+htx_symbol_from_channel(Ch0) ->
+    Ch = arbiguard_util:to_binary(Ch0),
+    Parts = binary:split(Ch, <<".">>, [global]),
+    case Parts of
+        [<<"market">>, Contract, <<"ticker">>] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
+        _ -> <<"">>
+    end.
+
+side_price([Price | _]) ->
+    arbiguard_util:to_float(Price, 0);
+side_price(Value) ->
+    arbiguard_util:to_float(Value, 0).
+
+map_get_any([], _Map, Default) ->
+    Default;
+map_get_any([Key | Rest], Map, Default) ->
+    case maps:find(Key, Map) of
+        {ok, Value} -> Value;
+        error -> map_get_any(Rest, Map, Default)
+    end.
+
+maybe_gunzip(Data) ->
+    try zlib:gunzip(Data)
+    catch _:_ -> Data
+    end.
+
+ensure_path(<<"/", _/binary>> = Path) -> Path;
+ensure_path(Path) -> <<"/", Path/binary>>.
 
 fmt(Term) ->
     unicode:characters_to_binary(io_lib:format("~p", [Term])).

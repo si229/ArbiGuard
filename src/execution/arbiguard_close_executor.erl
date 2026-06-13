@@ -73,5 +73,8 @@ dispatch_close(Req0, Order) ->
             _ = catch arbiguard_live_account:submit_order(Req, Order),
             Order#{status => <<"submitted_live_close">>, submitted_at => arbiguard_util:now_ms()};
         _ ->
-            Order#{status => <<"queued_paper_close">>, queued_at => arbiguard_util:now_ms()}
+            Order#{status => <<"queued_paper_close">>,
+                   exchange_submit => <<"skipped_paper_account">>,
+                   execution_path => <<"planned_subscribed_paper_close_no_exchange_submit">>,
+                   queued_at => arbiguard_util:now_ms()}
     end.

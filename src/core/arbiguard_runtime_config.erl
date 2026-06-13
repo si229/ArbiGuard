@@ -1,0 +1,39 @@
+-module(arbiguard_runtime_config).
+
+-export([set_exchange_ws_endpoint/4]).
+
+set_exchange_ws_endpoint(ExchangeID0, Host0, Port0, Path0) ->
+    ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
+    Host = arbiguard_util:to_binary(Host0),
+    Port = arbiguard_util:to_int(Port0, 443),
+    Path = ensure_path(arbiguard_util:to_binary(Path0)),
+    Exchanges0 = application:get_env(arbiguard, exchanges, []),
+    {Found, Exchanges} = update_exchange(ExchangeID, Host, Port, Path, Exchanges0),
+    case Found of
+        true ->
+            ok = application:set_env(arbiguard, exchanges, Exchanges),
+            Result = catch arbiguard_exchange_ticker:set_ws_endpoint(ExchangeID, Host, Port, Path),
+            #{ok => true, exchange => ExchangeID, ws_host => Host, ws_port => Port,
+              ws_path => Path, ticker_result => format_result(Result)};
+        false ->
+            #{ok => false, error => <<"exchange_not_found">>, exchange => ExchangeID}
+    end.
+
+update_exchange(_ID, _Host, _Port, _Path, []) ->
+    {false, []};
+update_exchange(ID, Host, Port, Path, [E | Rest]) ->
+    case string:lowercase(arbiguard_util:to_binary(maps:get(id, E, <<"">>))) =:= ID of
+        true ->
+            {true, [E#{ws_host => Host, ws_port => Port, ws_path => Path} | Rest]};
+        false ->
+            {Found, Rows} = update_exchange(ID, Host, Port, Path, Rest),
+            {Found, [E | Rows]}
+    end.
+
+ensure_path(<<"/", _/binary>> = Path) -> Path;
+ensure_path(Path) -> <<"/", Path/binary>>.
+
+format_result({'EXIT', Reason}) ->
+    unicode:characters_to_binary(io_lib:format("~p", [Reason]));
+format_result(Result) ->
+    Result.

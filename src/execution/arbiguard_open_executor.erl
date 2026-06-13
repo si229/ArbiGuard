@@ -101,7 +101,10 @@ dispatch_order(Req0, Order, Op) ->
             Order#{status => <<"submitted_live_open">>, submitted_at => arbiguard_util:now_ms()};
         _ ->
             _ = catch arbiguard_state:apply_open_order(Req, Order, Op),
-            Order#{status => <<"filled_paper_open">>, filled_at => arbiguard_util:now_ms()}
+            Order#{status => <<"filled_paper_open">>,
+                   exchange_submit => <<"skipped_paper_account">>,
+                   execution_path => <<"planned_subscribed_paper_filled_no_exchange_submit">>,
+                   filled_at => arbiguard_util:now_ms()}
     end.
 
 order_key(Op) ->

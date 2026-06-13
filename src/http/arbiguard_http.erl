@@ -96,6 +96,14 @@ route(#{method := <<"GET">>, path := <<"/api/health">>}) ->
     json_response(200, #{ok => true, app => <<"ArbiGuard">>});
 route(#{method := <<"GET">>, path := <<"/api/config">>}) ->
     json_response(200, arbiguard_config:snapshot());
+route(#{method := <<"POST">>, path := <<"/api/config/exchange/ws">>, body := Body}) ->
+    Payload = safe_decode(Body),
+    Result = arbiguard_runtime_config:set_exchange_ws_endpoint(
+               maps:get(exchange, Payload, <<"">>),
+               maps:get(ws_host, Payload, <<"">>),
+               maps:get(ws_port, Payload, 443),
+               maps:get(ws_path, Payload, <<"/">>)),
+    json_response(200, Result);
 route(#{method := <<"GET">>, path := <<"/api/processes">>}) ->
     json_response(200, arbiguard_processes:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/executor/state">>}) ->
