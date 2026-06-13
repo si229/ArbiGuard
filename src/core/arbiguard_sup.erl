@@ -11,7 +11,8 @@ init([]) ->
     ok = arbiguard_ets:init(),
     Port = application:get_env(arbiguard, http_port, 8771),
     Capital = application:get_env(arbiguard, paper_capital_usdt, 10000.0),
-    Exchanges = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
+    Exchanges0 = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
+    Exchanges = enabled_exchanges(Exchanges0),
     ExchangeChildren = exchange_children(Exchanges),
     CoreChildren = [
         #{id => arbiguard_state,
@@ -64,6 +65,9 @@ init([]) ->
 
 exchange_children(Exchanges) ->
     lists:append([exchange_child_specs(E) || E <- Exchanges]).
+
+enabled_exchanges(Exchanges) ->
+    [E || E <- Exchanges, maps:get(enabled, E, true) =:= true].
 
 exchange_child_specs(Exchange) ->
     [ticker_child(Exchange), funding_child(Exchange)].

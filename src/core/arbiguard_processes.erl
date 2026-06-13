@@ -3,7 +3,8 @@
 -export([snapshot/0]).
 
 snapshot() ->
-    Exchanges = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
+    Exchanges0 = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
+    Exchanges = enabled_exchanges(Exchanges0),
     #{ets => ets_info(),
       scanner => safe_call(fun arbiguard_scanner:snapshot/0),
       symbol_watcher => safe_call(fun arbiguard_symbol_watcher:snapshot/0),
@@ -11,6 +12,9 @@ snapshot() ->
       account => account_brief(),
       live_account => safe_call(fun arbiguard_live_account:snapshot/0),
       exchanges => [exchange_snapshot(E) || E <- Exchanges]}.
+
+enabled_exchanges(Exchanges) ->
+    [E || E <- Exchanges, maps:get(enabled, E, true) =:= true].
 
 ets_info() ->
     #{tickers => length(arbiguard_ets:all_tickers()),

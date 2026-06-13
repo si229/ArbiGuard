@@ -16,10 +16,11 @@ refresh() ->
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
 
-init([Exchanges]) ->
+init([Exchanges0]) ->
     Enabled = application:get_env(arbiguard, symbol_watch_enabled, true),
     SubscribeAll = application:get_env(arbiguard, subscribe_all_tickers, true),
     Interval = application:get_env(arbiguard, symbol_watch_interval_ms, 60000),
+    Exchanges = enabled_exchanges(Exchanges0),
     case Enabled of
         true -> self() ! refresh;
         false -> ok
@@ -103,6 +104,9 @@ maybe_subscribe_all(true, ID, Added) ->
 maybe_unsubscribe_all(ID, Removed) ->
     [catch arbiguard_exchange_ticker:unsubscribe(ID, Symbol, symbol_watcher) || Symbol <- Removed],
     ok.
+
+enabled_exchanges(Exchanges) ->
+    [E || E <- Exchanges, maps:get(enabled, E, true) =:= true].
 
 state_snapshot(State = #state{symbols = Symbols}) ->
     #{enabled => State#state.enabled,
