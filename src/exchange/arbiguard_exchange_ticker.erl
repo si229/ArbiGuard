@@ -1,7 +1,8 @@
 -module(arbiguard_exchange_ticker).
 -behaviour(gen_server).
 
--export([start_link/1, start_ws/1, set_ws_endpoint/4, subscribe/3, unsubscribe/3, upsert_ticker/2, snapshot/1, name/1]).
+-export([start_link/1, start_ws/1, set_ws_endpoint/4, subscribe/3, subscribe/4,
+         unsubscribe/3, unsubscribe/4, upsert_ticker/2, snapshot/1, name/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {exchange, id, subscriptions = #{}, ws_enabled = false,
@@ -19,10 +20,16 @@ set_ws_endpoint(ExchangeID, Host, Port, Path) ->
     gen_server:call(name(ExchangeID), {set_ws_endpoint, Host, Port, Path}).
 
 subscribe(ExchangeID, Symbol, Reason) ->
-    gen_server:call(name(ExchangeID), {subscribe, Symbol, Reason}).
+    subscribe(ExchangeID, Symbol, Reason, self()).
+
+subscribe(ExchangeID, Symbol, Reason, SubscriberPid) ->
+    gen_server:call(name(ExchangeID), {subscribe, Symbol, Reason, SubscriberPid}).
 
 unsubscribe(ExchangeID, Symbol, Reason) ->
-    gen_server:call(name(ExchangeID), {unsubscribe, Symbol, Reason}).
+    unsubscribe(ExchangeID, Symbol, Reason, self()).
+
+unsubscribe(ExchangeID, Symbol, Reason, SubscriberPid) ->
+    gen_server:call(name(ExchangeID), {unsubscribe, Symbol, Reason, SubscriberPid}).
 
 upsert_ticker(ExchangeID, Row) ->
     gen_server:cast(name(ExchangeID), {upsert_ticker, Row}).
@@ -60,34 +67,38 @@ handle_call({set_ws_endpoint, Host0, Port0, Path0}, _From, State) ->
                                   ws_stream = undefined},
     {reply, #{ok => true, exchange => State#state.id, ws_host => Host, ws_port => Port, ws_path => Path},
      do_start_ws(NewState0)};
-handle_call({subscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
+handle_call({subscribe, Symbol0, Reason, SubscriberPid}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
-    OldReasons = maps:get(Symbol, Subs, []),
+    OldReasonMap = normalize_subscription(maps:get(Symbol, Subs, #{})),
+    OldReasons = maps:keys(OldReasonMap),
     AlreadyWsSubscribed = has_exchange_ws_reason(OldReasons),
-    NewReasons = add_reason(Reason, OldReasons),
+    NewReasonMap = add_subscriber(Reason, SubscriberPid, OldReasonMap),
+    NewReasons = maps:keys(NewReasonMap),
     ShouldWsSubscribe = has_exchange_ws_reason(NewReasons) andalso not AlreadyWsSubscribed,
-    lager:info("ticker local subscribe exchange=~s symbol=~s reason=~p ws_subscribe=~p reasons=~p",
-               [State#state.id, Symbol, Reason, ShouldWsSubscribe, NewReasons]),
-    State1 = State#state{subscriptions = Subs#{Symbol => NewReasons}},
+    lager:info("ticker local subscribe exchange=~s symbol=~s reason=~p subscriber=~p ws_subscribe=~p reasons=~p",
+               [State#state.id, Symbol, Reason, SubscriberPid, ShouldWsSubscribe, NewReasons]),
+    State1 = State#state{subscriptions = Subs#{Symbol => NewReasonMap}},
     NewState = case ShouldWsSubscribe of
         true -> maybe_ws_subscribe(State1, Symbol);
         false -> State1
     end,
     {reply, ok, NewState};
-handle_call({unsubscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
+handle_call({unsubscribe, Symbol0, Reason, SubscriberPid}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
-    OldReasons = maps:get(Symbol, Subs, []),
-    NewReasons = remove_reason(Reason, OldReasons),
+    OldReasonMap = normalize_subscription(maps:get(Symbol, Subs, #{})),
+    OldReasons = maps:keys(OldReasonMap),
+    NewReasonMap = remove_subscriber(Reason, SubscriberPid, OldReasonMap),
+    NewReasons = maps:keys(NewReasonMap),
     ShouldWsUnsubscribe = has_exchange_ws_reason(OldReasons) andalso not has_exchange_ws_reason(NewReasons),
-    lager:info("ticker local unsubscribe exchange=~s symbol=~s reason=~p ws_unsubscribe=~p remaining=~p",
-               [State#state.id, Symbol, Reason, ShouldWsUnsubscribe, NewReasons]),
+    lager:info("ticker local unsubscribe exchange=~s symbol=~s reason=~p subscriber=~p ws_unsubscribe=~p remaining=~p",
+               [State#state.id, Symbol, Reason, SubscriberPid, ShouldWsUnsubscribe, NewReasons]),
     State1 = case ShouldWsUnsubscribe of
         true -> maybe_ws_unsubscribe(State, Symbol);
         false -> State
     end,
     State2 = case NewReasons of
         [] -> State1#state{subscriptions = maps:remove(Symbol, Subs)};
-        _ -> State1#state{subscriptions = Subs#{Symbol => NewReasons}}
+        _ -> State1#state{subscriptions = Subs#{Symbol => NewReasonMap}}
     end,
     {reply, ok, State2};
 handle_call(snapshot, _From, State = #state{subscriptions = Subs}) ->
@@ -245,7 +256,7 @@ replay_subscriptions(State = #state{id = <<"binance">>}) ->
 replay_subscriptions(State = #state{subscriptions = Subs}) ->
     lists:foldl(fun
         (Symbol, Acc) ->
-            case has_exchange_ws_reason(maps:get(Symbol, Subs, [])) of
+            case has_exchange_ws_reason(maps:keys(normalize_subscription(maps:get(Symbol, Subs, #{})))) of
                 true -> maybe_ws_subscribe(Acc, Symbol);
                 false -> Acc
             end
@@ -470,14 +481,13 @@ trade_mid(_Bid, _Ask, Last) ->
 
 forward_ticker(Row, #state{subscriptions = Subs}) ->
     Symbol = maps:get(symbol, Row),
-    Reasons = maps:get(Symbol, Subs, []),
-    maybe_send_ticker(lists:member(open_execution_order, Reasons), arbiguard_open_executor, Row),
-    maybe_send_ticker(lists:member(close_execution_order, Reasons), arbiguard_close_executor, Row),
+    ReasonMap = normalize_subscription(maps:get(Symbol, Subs, #{})),
+    maybe_send_ticker(maps:get(open_execution_order, ReasonMap, []), Row),
+    maybe_send_ticker(maps:get(close_execution_order, ReasonMap, []), Row),
     ok.
 
-maybe_send_ticker(true, PidName, Row) ->
-    PidName ! {ticker_update, Row};
-maybe_send_ticker(false, _PidName, _Row) ->
+maybe_send_ticker(Subscribers, Row) ->
+    [Pid ! {ticker_update, Row} || Pid <- Subscribers, is_pid(Pid)],
     ok.
 
 okx_symbol(Symbol) ->
@@ -508,11 +518,32 @@ side_price([Price | _]) ->
 side_price(Value) ->
     arbiguard_util:to_float(Value, 0).
 
-add_reason(Reason, Reasons) ->
-    lists:usort([Reason | Reasons]).
+normalize_subscription(Subscription) when is_map(Subscription) ->
+    maps:map(fun(_Reason, Pids) -> normalize_pids(Pids) end, Subscription);
+normalize_subscription(Reasons) when is_list(Reasons) ->
+    %% Compatibility with older state shape: Symbol => [Reason].
+    maps:from_list([{Reason, []} || Reason <- Reasons]);
+normalize_subscription(_) ->
+    #{}.
 
-remove_reason(Reason, Reasons) ->
-    [R || R <- Reasons, R =/= Reason].
+normalize_pids(Pids) when is_list(Pids) ->
+    lists:usort([Pid || Pid <- Pids, is_pid(Pid)]);
+normalize_pids(Pid) when is_pid(Pid) ->
+    [Pid];
+normalize_pids(_) ->
+    [].
+
+add_subscriber(Reason, SubscriberPid, ReasonMap) ->
+    OldPids = maps:get(Reason, ReasonMap, []),
+    ReasonMap#{Reason => lists:usort([SubscriberPid | OldPids])}.
+
+remove_subscriber(Reason, SubscriberPid, ReasonMap) ->
+    OldPids = maps:get(Reason, ReasonMap, []),
+    NewPids = [Pid || Pid <- OldPids, Pid =/= SubscriberPid],
+    case NewPids of
+        [] -> maps:remove(Reason, ReasonMap);
+        _ -> ReasonMap#{Reason => NewPids}
+    end.
 
 has_exchange_ws_reason(Reasons) ->
     lists:any(fun exchange_ws_reason/1, Reasons).
