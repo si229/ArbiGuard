@@ -1,7 +1,7 @@
 -module(arbiguard_scanner).
 -behaviour(gen_server).
 
--export([start_link/0, scan/1, scan_once/1, snapshot/0]).
+-export([start_link/0, scan/1, scan_once/1, apply_settings/1, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {req = #{}, interval_ms = 1000, last_result = #{}, last_scan = 0}).
@@ -11,6 +11,9 @@ start_link() ->
 
 scan_once(Req) ->
     gen_server:call(?MODULE, {scan_once, Req}, 30000).
+
+apply_settings(Req) ->
+    gen_server:call(?MODULE, {apply_settings, Req}, 30000).
 
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
@@ -24,9 +27,17 @@ handle_call({scan_once, Req}, _From, State) ->
     Result = run_scan(Req),
     arbiguard_executor:notify_opportunities(Req, Result),
     {reply, Result, State#state{req = Req, last_result = Result, last_scan = arbiguard_util:now_ms()}};
+handle_call({apply_settings, Req0}, _From, State) ->
+    Req = arbiguard_calc:normalize_request(Req0),
+    {reply, #{ok => true,
+              applied_at => arbiguard_util:now_ms(),
+              scanner_interval_ms => State#state.interval_ms,
+              next_scan_uses => Req},
+     State#state{req = Req}};
 handle_call(snapshot, _From, State) ->
     {reply, #{last_scan => State#state.last_scan,
               interval_ms => State#state.interval_ms,
+              active_request => State#state.req,
               last_result => State#state.last_result}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.

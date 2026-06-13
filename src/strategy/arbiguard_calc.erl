@@ -78,7 +78,7 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
             ShortPrice = f(maps:get(mark_price, ShortLeg, 0), 0),
             Mid = (LongPrice + ShortPrice) / 2,
             PriceGap = (ShortPrice - LongPrice) / Mid,
-            FundingEdge0 = funding_window_return(LongLeg, ShortLeg),
+            FundingEdge0 = next_settlement_return(LongLeg, ShortLeg),
             {FundingEdge, Method0} =
                 case can_collect_short_before_long(LongLeg, ShortLeg) of
                     true -> {f(maps:get(funding_rate, ShortLeg, 0), 0), <<"pre_settlement_short_funding">>};
@@ -161,13 +161,22 @@ short_cycle_positive(LongLeg, ShortLeg) ->
         false -> f(maps:get(funding_rate, ShortLeg, 0), 0) > 0
     end.
 
-funding_window_return(LongLeg, ShortLeg) ->
-    LI = normalize_window(f(maps:get(funding_interval_hours, LongLeg, 8), 8)),
-    SI = normalize_window(f(maps:get(funding_interval_hours, ShortLeg, 8), 8)),
-    W = max(LI, SI),
-    ShortIncome = f(maps:get(funding_rate, ShortLeg, 0), 0) * (W / SI),
-    LongCost = f(maps:get(funding_rate, LongLeg, 0), 0) * (W / LI),
-    ShortIncome - LongCost.
+next_settlement_return(LongLeg, ShortLeg) ->
+    LongPNL = -f(maps:get(funding_rate, LongLeg, 0), 0),
+    ShortPNL = f(maps:get(funding_rate, ShortLeg, 0), 0),
+    LongNext = maps:get(next_funding_time, LongLeg, 0),
+    ShortNext = maps:get(next_funding_time, ShortLeg, 0),
+    SameWindow = LongNext > 0 andalso ShortNext > 0 andalso abs(LongNext - ShortNext) =< 60000,
+    case SameWindow of
+        true ->
+            LongPNL + ShortPNL;
+        false when LongNext > 0, ShortNext > 0, LongNext < ShortNext ->
+            max(0.0, LongPNL);
+        false when LongNext > 0, ShortNext > 0, ShortNext < LongNext ->
+            max(0.0, ShortPNL);
+        false ->
+            LongPNL + ShortPNL
+    end.
 
 can_collect_short_before_long(LongLeg, ShortLeg) ->
     S = maps:get(next_funding_time, ShortLeg, 0),

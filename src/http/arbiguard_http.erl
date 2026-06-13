@@ -130,6 +130,9 @@ route(#{method := <<"POST">>, path := <<"/api/live/token">>, body := Body}) ->
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
     Payload = safe_decode(Body),
     json_response(200, arbiguard_state:reset_paper(Payload));
+route(#{method := <<"POST">>, path := <<"/api/funding/apply-settings">>, body := Body}) ->
+    Payload = safe_decode(Body),
+    json_response(200, arbiguard_scanner:apply_settings(Payload));
 route(#{method := <<"POST">>, path := <<"/api/funding/scan">>, body := Body}) ->
     Payload = safe_decode(Body),
     Result = arbiguard_scanner:scan_once(Payload),

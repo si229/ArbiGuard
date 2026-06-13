@@ -246,6 +246,7 @@ maybe_close_tracked_position(Order, Cache) ->
                                                     position => Position,
                                                     close_rule => maps:get(close_rule, Position, <<"strategy_close">>)});
                 false ->
+                    _ = catch arbiguard_state:update_position(Position),
                     Order#{position => maps:without([should_close], Position),
                            close_rule => maps:get(close_rule, Position, <<"watch">>)}
             end;
@@ -376,14 +377,16 @@ settle_leg(short, Position, Now, Count) ->
 evaluate_position_strategy(Position0, Req) ->
     Now = arbiguard_util:now_ms(),
     {Threshold, LockRule} = close_threshold(Position0, Now),
-    Position = recompute_position_pnl(Position0#{close_threshold => Threshold}),
-    PriceGapLimit = f(maps:get(price_gap_close_profit_usdt, Req, 10), 10),
+    Position = recompute_position_pnl(mark_liquidation_emergency(Position0#{close_threshold => Threshold}, Now)),
+    MinProfit = min_close_profit_usdt(Req),
+    PriceGapLimit = f(maps:get(price_gap_close_profit_usdt, Req, MinProfit), MinProfit),
     Rules = [
         {emergency_close(Position, Now), emergency_rule(Position, Now)},
         {delist_profit_close(Position, Now), <<"delist_profit_close">>},
-        {f(maps:get(unrealized_pnl, Position, 0), 0) >= PriceGapLimit, <<"profit_usdt_close">>},
+        {f(maps:get(unrealized_pnl, Position, 0), 0) >= MinProfit, <<"min_profit_close">>},
         {next_funding_loss_close(Position), next_funding_loss_rule(Position)},
         {after_funding_settlement_close(Position, Req), <<"after_funding_settlement_profit_close">>},
+        {f(maps:get(unrealized_pnl, Position, 0), 0) >= PriceGapLimit, <<"price_gap_profit_close">>},
         {progressive_profit_close(Position), LockRule}
     ],
     case first_close_rule(Rules) of
@@ -394,6 +397,10 @@ evaluate_position_strategy(Position0, Req) ->
 first_close_rule([]) -> none;
 first_close_rule([{true, Rule} | _]) -> Rule;
 first_close_rule([_ | Rest]) -> first_close_rule(Rest).
+
+min_close_profit_usdt(Req) ->
+    f(maps:get(min_execution_profit_usdt, Req,
+               maps:get(price_gap_close_profit_usdt, Req, 10)), 10).
 
 close_threshold(Position, Now) ->
     Next = min_positive(maps:get(long_next_funding_time, Position, 0), maps:get(short_next_funding_time, Position, 0)),
@@ -444,7 +451,7 @@ after_funding_settlement_close(Position, Req) ->
     maps:get(last_funding_settled_at, Position, 0) > 0 andalso
     not (f(maps:get(last_funding_settlement_pnl, Position, 0), 0) > 0 andalso
          funding_cycle_mismatch(Position) andalso next_funding_event_pnl(Position) =< 0) andalso
-    f(maps:get(unrealized_pnl, Position, 0), 0) >= f(maps:get(price_gap_close_profit_usdt, Req, 10), 10).
+    f(maps:get(unrealized_pnl, Position, 0), 0) >= min_close_profit_usdt(Req).
 
 delist_profit_close(Position, Now) ->
     f(maps:get(unrealized_pnl, Position, 0), 0) > 0 andalso
@@ -460,6 +467,60 @@ emergency_rule(Position, Now) ->
         true -> <<"liquidation_hedge_profit_0_5s">>;
         false -> <<"liquidation_hedge_market_1s">>
     end.
+
+mark_liquidation_emergency(Position, Now) ->
+    case maps:get(emergency_started_at, Position, 0) > 0 of
+        true -> Position;
+        false ->
+            Position1 = ensure_liquidation_prices(Position),
+            case liquidation_risk(Position1) of
+                true ->
+                    lager:warning("liquidation emergency start symbol=~s long=~s short=~s long_mark=~p long_liq=~p short_mark=~p short_liq=~p",
+                                  [maps:get(symbol, Position1, <<"">>), maps:get(long_exchange, Position1, <<"">>),
+                                   maps:get(short_exchange, Position1, <<"">>),
+                                   maps:get(long_mark_price, Position1, 0), maps:get(long_liquidation_price, Position1, 0),
+                                   maps:get(short_mark_price, Position1, 0), maps:get(short_liquidation_price, Position1, 0)]),
+                    Position1#{emergency_started_at => Now,
+                               emergency_reason => <<"mark_price_near_liquidation">>};
+                false ->
+                    Position1
+            end
+    end.
+
+ensure_liquidation_prices(Position) ->
+    Leverage = max(1.0, f(maps:get(leverage, Position, 10), 10)),
+    LongEntry = f(maps:get(long_entry_price, Position, 0), 0),
+    ShortEntry = f(maps:get(short_entry_price, Position, 0), 0),
+    LongLiq0 = f(maps:get(long_liquidation_price, Position, 0), 0),
+    ShortLiq0 = f(maps:get(short_liquidation_price, Position, 0), 0),
+    Position#{long_liquidation_price => choose_positive(LongLiq0, long_liquidation_price(LongEntry, Leverage)),
+              short_liquidation_price => choose_positive(ShortLiq0, short_liquidation_price(ShortEntry, Leverage)),
+              liquidation_price_basis => maps:get(liquidation_price_basis, Position, <<"mark_price">>)}.
+
+liquidation_risk(Position) ->
+    Buffer = f(application:get_env(arbiguard, liquidation_guard_buffer_rate, 0.01), 0.01),
+    LongMark = f(maps:get(long_mark_price, Position, maps:get(long_current_price, Position, 0)), 0),
+    ShortMark = f(maps:get(short_mark_price, Position, maps:get(short_current_price, Position, 0)), 0),
+    LongLiq = f(maps:get(long_liquidation_price, Position, 0), 0),
+    ShortLiq = f(maps:get(short_liquidation_price, Position, 0), 0),
+    LongRisk = LongMark > 0 andalso LongLiq > 0 andalso LongMark =< LongLiq * (1.0 + Buffer),
+    ShortRisk = ShortMark > 0 andalso ShortLiq > 0 andalso ShortMark >= ShortLiq * (1.0 - Buffer),
+    LongRisk orelse ShortRisk.
+
+long_liquidation_price(Entry, Leverage) ->
+    case Entry > 0 andalso Leverage > 0 of
+        true -> Entry * max(0.0, 1.0 - 1.0 / Leverage);
+        false -> 0.0
+    end.
+
+short_liquidation_price(Entry, Leverage) ->
+    case Entry > 0 andalso Leverage > 0 of
+        true -> Entry * (1.0 + 1.0 / Leverage);
+        false -> 0.0
+    end.
+
+choose_positive(Value, _Fallback) when Value > 0 -> Value;
+choose_positive(_Value, Fallback) -> Fallback.
 
 recompute_position_pnl(Position) ->
     PricePNL = long_leg_pnl(Position) + short_leg_pnl(Position),

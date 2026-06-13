@@ -2,6 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1, snapshot/0, reset_paper/1, submit_scan/2, apply_open_order/3, apply_close_order/3,
+         update_position/1,
          set_exchange_token/2, get_exchange_token/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -24,6 +25,9 @@ apply_open_order(Req, Order, Opportunity) ->
 
 apply_close_order(Req, Order, Position) ->
     gen_server:call(?MODULE, {apply_close_order, Req, Order, Position}).
+
+update_position(Position) ->
+    gen_server:call(?MODULE, {update_position, Position}).
 
 set_exchange_token(ExchangeID, TokenConfig) ->
     gen_server:call(?MODULE, {set_exchange_token, ExchangeID, TokenConfig}).
@@ -57,6 +61,10 @@ handle_call({apply_close_order, _Req0, Order, Position0}, _From, State = #state{
     Position = normalize_close_position(Position0),
     Key = maps:get(id, Position, maps:get(position_id, Order, maps:get(id, Order, <<"">>))),
     Paper1 = close_position(Paper0, Key, Position, maps:get(close_rule, Order, maps:get(close_rule, Position, <<"strategy_close">>))),
+    Paper = refresh_equity(Paper1#{updated_at => iso_now()}),
+    {reply, paper_snapshot(Paper), State#state{paper = Paper}};
+handle_call({update_position, Position0}, _From, State = #state{paper = Paper0}) ->
+    Paper1 = update_position_in_paper(Paper0, Position0),
     Paper = refresh_equity(Paper1#{updated_at => iso_now()}),
     {reply, paper_snapshot(Paper), State#state{paper = Paper}};
 handle_call({set_exchange_token, ExchangeID, TokenConfig}, _From, State) ->
@@ -153,6 +161,17 @@ refresh_position(Pos, Op) ->
         updated_at => arbiguard_util:now_ms()
     }.
 
+update_position_in_paper(Paper, Position0) ->
+    Key = maps:get(id, Position0, maps:get(position_id, Position0, <<"">>)),
+    Positions0 = maps:get(positions, Paper, #{}),
+    case maps:get(Key, Positions0, undefined) of
+        undefined ->
+            Paper;
+        Stored ->
+            Position = maps:merge(Stored, maps:without([should_close], Position0)),
+            Paper#{positions => Positions0#{Key => Position}}
+    end.
+
 open_best(Paper, Req, Ops0) ->
     MaxOpen = max(0, maps:get(max_open_positions, Req, 5)),
     Ops = lists:sort(fun(A, B) -> maps:get(expected_net_return, A, 0) >= maps:get(expected_net_return, B, 0) end, Ops0),
@@ -190,6 +209,8 @@ open_position(Paper, Req, Key, Op, Notional) ->
     LongFeeRate = maps:get(long_fee_rate, Op, 0.0005),
     ShortFeeRate = maps:get(short_fee_rate, Op, 0.0005),
     Margin = Notional / Leverage,
+    LongLiq = long_liquidation_price(LongPrice, Leverage),
+    ShortLiq = short_liquidation_price(ShortPrice, Leverage),
     OpenFee = Notional * (LongFeeRate + ShortFeeRate),
     Bal0 = maps:get(exchange_balances, Paper, #{}),
     LongNeed = Margin + Notional * LongFeeRate,
@@ -214,6 +235,8 @@ open_position(Paper, Req, Key, Op, Notional) ->
                     short_mark_price => ShortMarkPrice,
                     long_liquidation_reference_price => LongMarkPrice,
                     short_liquidation_reference_price => ShortMarkPrice,
+                    long_liquidation_price => LongLiq,
+                    short_liquidation_price => ShortLiq,
                     liquidation_price_basis => <<"mark_price">>,
                     long_qty => LongQty,
                     short_qty => ShortQty,
@@ -357,7 +380,9 @@ paper_snapshot(Paper) ->
         positions => Positions,
         logs => Logs,
         pair_stats => pair_stats(Positions, Logs),
-        exchange_equity => exchange_equity(Paper)
+        exchange_equity => exchange_equity(Paper),
+        exchange_margin => exchange_margin(Paper),
+        exchange_unrealized_pnl => exchange_unrealized_pnl(Paper)
     }.
 
 position_by_id(ID, Snapshot) ->
@@ -388,6 +413,20 @@ exchange_equity(Paper) ->
         Value + lists:sum([position_exchange_equity_delta(Ex, P) || {_K, P} <- maps:to_list(Positions)])
     end, Bal).
 
+exchange_margin(Paper) ->
+    Bal = maps:get(exchange_balances, Paper, #{}),
+    Positions = maps:get(positions, Paper, #{}),
+    maps:map(fun(Ex, _Value) ->
+        lists:sum([position_exchange_margin(Ex, P) || {_K, P} <- maps:to_list(Positions)])
+    end, Bal).
+
+exchange_unrealized_pnl(Paper) ->
+    Bal = maps:get(exchange_balances, Paper, #{}),
+    Positions = maps:get(positions, Paper, #{}),
+    maps:map(fun(Ex, _Value) ->
+        lists:sum([position_exchange_unrealized_pnl(Ex, P) || {_K, P} <- maps:to_list(Positions)])
+    end, Bal).
+
 position_exchange_equity_delta(Ex, P) ->
     LongDelta = case maps:get(long_exchange, P, <<"">>) =:= Ex of
         true -> maps:get(long_margin, P, 0) + long_leg_pnl(P);
@@ -398,6 +437,28 @@ position_exchange_equity_delta(Ex, P) ->
         false -> 0.0
     end,
     LongDelta + ShortDelta.
+
+position_exchange_margin(Ex, P) ->
+    LongMargin = case maps:get(long_exchange, P, <<"">>) =:= Ex of
+        true -> maps:get(long_margin, P, 0);
+        false -> 0.0
+    end,
+    ShortMargin = case maps:get(short_exchange, P, <<"">>) =:= Ex of
+        true -> maps:get(short_margin, P, 0);
+        false -> 0.0
+    end,
+    LongMargin + ShortMargin.
+
+position_exchange_unrealized_pnl(Ex, P) ->
+    LongPNL = case maps:get(long_exchange, P, <<"">>) =:= Ex of
+        true -> long_leg_pnl(P);
+        false -> 0.0
+    end,
+    ShortPNL = case maps:get(short_exchange, P, <<"">>) =:= Ex of
+        true -> short_leg_pnl(P);
+        false -> 0.0
+    end,
+    LongPNL + ShortPNL.
 
 long_leg_pnl(P) ->
     LongPrice = maps:get(long_current_price, P, maps:get(long_entry_price, P, 0)),
@@ -442,6 +503,18 @@ max_position(Req) ->
 
 safe_div(_A, B) when B =< 0 -> 0.0;
 safe_div(A, B) -> A / B.
+
+long_liquidation_price(Entry, Leverage) ->
+    case Entry > 0 andalso Leverage > 0 of
+        true -> Entry * max(0.0, 1.0 - 1.0 / Leverage);
+        false -> 0.0
+    end.
+
+short_liquidation_price(Entry, Leverage) ->
+    case Entry > 0 andalso Leverage > 0 of
+        true -> Entry * (1.0 + 1.0 / Leverage);
+        false -> 0.0
+    end.
 
 positive(V, _Fallback) when V > 0 -> V;
 positive(_, Fallback) -> Fallback.

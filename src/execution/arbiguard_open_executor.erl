@@ -424,7 +424,7 @@ refresh_expected_profit(Op, Req) ->
     ShortPrice = maps:get(short_price, Op, 0.0),
     Mid = case LongPrice > 0 andalso ShortPrice > 0 of true -> (LongPrice + ShortPrice) / 2; false -> 0.0 end,
     PriceGap = case Mid > 0 of true -> (ShortPrice - LongPrice) / Mid; false -> 0.0 end,
-    FundingEdge = maps:get(funding_edge_return, Op, 0.0),
+    FundingEdge = next_settlement_return(Op),
     FeeRate = maps:get(long_fee_rate, Op, 0.0005) + maps:get(short_fee_rate, Op, 0.0005),
     ExpectedNetReturn = FundingEdge + PriceGap - FeeRate * 2,
     Notional = maps:get(suggested_notional, Op, maps:get(execution_notional_usdt, Req, 200.0)),
@@ -434,6 +434,23 @@ refresh_expected_profit(Op, Req) ->
         expected_net_return => ExpectedNetReturn,
         estimated_net_profit => Notional * ExpectedNetReturn,
         suggested_notional => Notional}.
+
+next_settlement_return(Op) ->
+    LongPNL = -arbiguard_util:to_float(maps:get(long_funding_rate, Op, 0), 0),
+    ShortPNL = arbiguard_util:to_float(maps:get(short_funding_rate, Op, 0), 0),
+    LongNext = maps:get(long_next_funding_time, Op, 0),
+    ShortNext = maps:get(short_next_funding_time, Op, 0),
+    SameWindow = LongNext > 0 andalso ShortNext > 0 andalso abs(LongNext - ShortNext) =< 60000,
+    case SameWindow of
+        true ->
+            LongPNL + ShortPNL;
+        false when LongNext > 0, ShortNext > 0, LongNext < ShortNext ->
+            max(0.0, LongPNL);
+        false when LongNext > 0, ShortNext > 0, ShortNext < LongNext ->
+            max(0.0, ShortPNL);
+        false ->
+            LongPNL + ShortPNL
+    end.
 
 require_profitable(Op, Req) ->
     MinProfit = maps:get(min_execution_profit_usdt, Req, 5.0),
