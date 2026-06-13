@@ -1,0 +1,9 @@
+{application, arbiguard,
+ [{description, "Cross-exchange perpetual arbitrage guard"},
+  {vsn, "0.1.0"},
+  {registered, [arbiguard_state, arbiguard_http]},
+  {mod, {arbiguard_app, []}},
+  {applications, [kernel, stdlib, inets, ssl, crypto]},
+  {env, [{http_port, 8771},
+         {paper_capital_usdt, 10000.0}]},
+  {modules, []}]}.
