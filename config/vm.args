@@ -1,0 +1,4 @@
+-name arbiguard@127.0.0.1
+-setcookie arbiguard_cookie
++P 1048576
++K true
