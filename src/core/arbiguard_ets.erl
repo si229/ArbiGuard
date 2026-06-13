@@ -1,7 +1,7 @@
 -module(arbiguard_ets).
 
 -export([init/0]).
--export([put_ticker/1, get_ticker/2, all_tickers/0,
+-export([put_ticker/1, delete_ticker/2, get_ticker/2, all_tickers/0,
          put_funding/1, get_funding/2, all_funding/0,
          put_opportunities/1, all_opportunities/0]).
 
@@ -18,6 +18,10 @@ init() ->
 put_ticker(Row) ->
     Key = key(Row),
     true = ets:insert(?TICKER, {Key, Row}),
+    ok.
+
+delete_ticker(Exchange, Symbol) ->
+    true = ets:delete(?TICKER, {norm_exchange(Exchange), norm_symbol(Symbol)}),
     ok.
 
 get_ticker(Exchange, Symbol) ->

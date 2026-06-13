@@ -91,11 +91,16 @@ handle_call({unsubscribe, Symbol0, Reason}, _From, State = #state{subscriptions 
     end,
     {reply, ok, State2};
 handle_call(snapshot, _From, State = #state{subscriptions = Subs}) ->
+    {WsHost, WsPort, WsPath, WsURL} = ws_endpoint_info(State),
     {reply, #{exchange => State#state.id,
               ws_enabled => State#state.ws_enabled,
               ws_connected => State#state.ws_connected,
               ws_status => State#state.ws_status,
               ws_error => State#state.ws_error,
+              ws_host => WsHost,
+              ws_port => WsPort,
+              ws_path => WsPath,
+              ws_url => WsURL,
               subscriptions => maps:keys(Subs)}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
@@ -151,7 +156,8 @@ connect_ws(State, Host, Port, Path) ->
     OpenOpts = #{transport => tls,
                  protocols => [http],
                  tcp_opts => [inet],
-                 tls_opts => [{server_name, HostName}]},
+                 tls_opts => [{server_name_indication, HostName},
+                              {verify, verify_none}]},
     case gun:open(HostName, Port, OpenOpts) of
         {ok, ConnPid} ->
             case gun:await_up(ConnPid, 10000) of
@@ -267,6 +273,18 @@ ws_endpoint(#state{exchange = Exchange}) ->
     case Host =/= <<"">> andalso Port > 0 of
         true -> {ok, Host, Port, Path};
         false -> {error, <<"websocket_endpoint_not_configured">>}
+    end.
+
+ws_endpoint_info(State) ->
+    case ws_endpoint(State) of
+        {ok, Host, Port, Path} ->
+            PortPart = case Port of
+                443 -> <<"">>;
+                _ -> unicode:characters_to_binary(io_lib:format(":~p", [Port]))
+            end,
+            {Host, Port, Path, <<"wss://", Host/binary, PortPart/binary, Path/binary>>};
+        {error, _Reason} ->
+            {<<"">>, 0, <<"">>, <<"">>}
     end.
 
 subscribe_payload(<<"okx">>, Symbol) ->

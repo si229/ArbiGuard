@@ -65,7 +65,26 @@ do_refresh(State = #state{exchange = Exchange, id = ID}) ->
 
 store_market_row(Row) ->
     ok = arbiguard_ets:put_funding(Row),
-    %% REST funding snapshots also carry mark price. Use them as a baseline
-    %% until the ticker WS process replaces prices with live ticker values.
-    ok = arbiguard_ets:put_ticker(Row),
+    %% Funding REST snapshots must not live in ticker ETS. If an older version
+    %% wrote this row into ticker ETS and no live bid/ask was ever received,
+    %% remove it so the UI/execution layer does not mistake funding data for WS.
+    cleanup_legacy_ticker(Row),
     ok.
+
+cleanup_legacy_ticker(Row) ->
+    Exchange = maps:get(exchange, Row, <<"">>),
+    Symbol = maps:get(symbol, Row, <<"">>),
+    case arbiguard_ets:get_ticker(Exchange, Symbol) of
+        {ok, Ticker} ->
+            case has_live_ticker_fields(Ticker) of
+                true -> ok;
+                false -> arbiguard_ets:delete_ticker(Exchange, Symbol)
+            end;
+        not_found -> ok
+    end.
+
+has_live_ticker_fields(Ticker) ->
+    arbiguard_util:to_float(maps:get(bid, Ticker, 0), 0) > 0 orelse
+    arbiguard_util:to_float(maps:get(ask, Ticker, 0), 0) > 0 orelse
+    arbiguard_util:to_float(maps:get(last_price, Ticker, 0), 0) > 0 orelse
+    arbiguard_util:to_float(maps:get(trade_mid_price, Ticker, 0), 0) > 0.
