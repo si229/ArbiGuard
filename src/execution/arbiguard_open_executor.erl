@@ -191,21 +191,40 @@ maybe_dispatch_symbol_orders(Symbol, State = #state{orders = Orders, ticker_cach
 maybe_dispatch_order(Order, Cache) ->
     case maps:get(status, Order, <<"">>) of
         <<"waiting_ws_ticker">> ->
-            Op0 = maps:get(opportunity, Order, #{}),
-            Req = arbiguard_calc:normalize_request(maps:get(req, Order, #{})),
-            case enrich_opportunity_from_cache(Op0, Req, Cache) of
-                {ok, Op} ->
-                    lager:info("open executor ws-ready symbol=~s long=~s short=~s long_price=~p short_price=~p long_mark=~p short_mark=~p",
-                               [maps:get(symbol, Op, <<"">>), maps:get(long_exchange, Op, <<"">>),
-                                maps:get(short_exchange, Op, <<"">>), maps:get(long_price, Op, 0),
-                                maps:get(short_price, Op, 0), maps:get(long_mark_price, Op, 0),
-                                maps:get(short_mark_price, Op, 0)]),
-                    dispatch_order(Req, public_order(Order), Op);
-                wait ->
-                    Order
-            end;
+            maybe_submit_from_ticker(Order, Cache);
+        <<"partial_live_open_continue">> ->
+            maybe_submit_from_ticker(Order, Cache);
         _ ->
             Order
+    end.
+
+maybe_submit_from_ticker(Order, Cache) ->
+    Op0 = maps:get(opportunity, Order, #{}),
+    Req = arbiguard_calc:normalize_request(maps:get(req, Order, #{})),
+    case enrich_opportunity_from_cache(apply_remaining_notional(Op0, Order), Req, Cache) of
+        {ok, Op} ->
+            lager:info("open executor ws-ready symbol=~s long=~s short=~s long_price=~p short_price=~p long_mark=~p short_mark=~p remaining=~p",
+                       [maps:get(symbol, Op, <<"">>), maps:get(long_exchange, Op, <<"">>),
+                        maps:get(short_exchange, Op, <<"">>), maps:get(long_price, Op, 0),
+                        maps:get(short_price, Op, 0), maps:get(long_mark_price, Op, 0),
+                        maps:get(short_mark_price, Op, 0), maps:get(suggested_notional, Op, 0)]),
+            dispatch_order(Req, public_order(apply_remaining_order(Order)), Op);
+        wait ->
+            Order
+    end.
+
+apply_remaining_order(Order) ->
+    Remaining = maps:get(remaining_notional, Order, maps:get(target_notional, Order, 0.0)),
+    case Remaining > 0 of
+        true -> Order#{target_notional => Remaining};
+        false -> Order
+    end.
+
+apply_remaining_notional(Op, Order) ->
+    Remaining = maps:get(remaining_notional, Order, maps:get(suggested_notional, Op, 0.0)),
+    case Remaining > 0 of
+        true -> Op#{suggested_notional => Remaining};
+        false -> Op
     end.
 
 enrich_opportunity_from_cache(Op, Req, Cache) ->

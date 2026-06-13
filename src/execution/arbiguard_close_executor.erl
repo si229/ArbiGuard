@@ -160,21 +160,40 @@ maybe_dispatch_symbol_orders(Symbol, State = #state{orders = Orders, ticker_cach
 maybe_dispatch_order(Order, Cache) ->
     case maps:get(status, Order, <<"">>) of
         <<"waiting_ws_ticker">> ->
-            Position0 = maps:get(position, Order, #{}),
-            case enrich_close_from_cache(Position0, Cache) of
-                {ok, Position} ->
-                    Req = maps:get(req, Order, #{}),
-                    lager:info("close executor ws-ready symbol=~s long=~s short=~s long_close=~p short_close=~p long_mark=~p short_mark=~p",
-                               [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
-                                maps:get(short_exchange, Position, <<"">>), maps:get(long_close_price, Position, 0),
-                                maps:get(short_close_price, Position, 0), maps:get(long_mark_price, Position, 0),
-                                maps:get(short_mark_price, Position, 0)]),
-                    dispatch_close(Req, (public_order(Order))#{position => Position});
-                wait ->
-                    Order
-            end;
+            maybe_submit_close_from_ticker(Order, Cache);
+        <<"partial_live_close_continue">> ->
+            maybe_submit_close_from_ticker(Order, Cache);
         _ ->
             Order
+    end.
+
+maybe_submit_close_from_ticker(Order, Cache) ->
+    Position0 = apply_remaining_notional(maps:get(position, Order, #{}), Order),
+    case enrich_close_from_cache(Position0, Cache) of
+        {ok, Position} ->
+            Req = maps:get(req, Order, #{}),
+            lager:info("close executor ws-ready symbol=~s long=~s short=~s long_close=~p short_close=~p long_mark=~p short_mark=~p remaining=~p",
+                       [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
+                        maps:get(short_exchange, Position, <<"">>), maps:get(long_close_price, Position, 0),
+                        maps:get(short_close_price, Position, 0), maps:get(long_mark_price, Position, 0),
+                        maps:get(short_mark_price, Position, 0), maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0))]),
+            dispatch_close(Req, (public_order(apply_remaining_order(Order)))#{position => Position});
+        wait ->
+            Order
+    end.
+
+apply_remaining_order(Order) ->
+    Remaining = maps:get(remaining_notional, Order, maps:get(target_notional, Order, 0.0)),
+    case Remaining > 0 of
+        true -> Order#{target_notional => Remaining};
+        false -> Order
+    end.
+
+apply_remaining_notional(Position, Order) ->
+    Remaining = maps:get(remaining_notional, Order, maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0))),
+    case Remaining > 0 of
+        true -> Position#{notional => Remaining, notional_usdt => Remaining};
+        false -> Position
     end.
 
 enrich_close_from_cache(Position, Cache) ->
