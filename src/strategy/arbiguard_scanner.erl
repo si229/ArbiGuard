@@ -86,8 +86,17 @@ run_scan(Req) ->
 merge_ets_market(Enabled) ->
     FundingRows = arbiguard_ets:all_funding(),
     TickerByKey = maps:from_list([{{maps:get(exchange, T, <<"">>), maps:get(symbol, T, <<"">>)}, T} || T <- arbiguard_ets:all_tickers()]),
-    [merge_ticker(Row, maps:get({maps:get(exchange, Row, <<"">>), maps:get(symbol, Row, <<"">>)}, TickerByKey, #{}))
-     || Row <- FundingRows, maps:is_key(maps:get(exchange, Row, <<"">>), Enabled)].
+    [merge_ticker(Row, Ticker)
+     || Row <- FundingRows,
+        maps:is_key(maps:get(exchange, Row, <<"">>), Enabled),
+        Ticker <- [maps:get({maps:get(exchange, Row, <<"">>), maps:get(symbol, Row, <<"">>)}, TickerByKey, #{})],
+        live_ticker_ready(Ticker)].
+
+live_ticker_ready(Ticker) when is_map(Ticker), map_size(Ticker) > 0 ->
+    arbiguard_util:to_float(maps:get(bid, Ticker, 0), 0) > 0 andalso
+    arbiguard_util:to_float(maps:get(ask, Ticker, 0), 0) > 0;
+live_ticker_ready(_Ticker) ->
+    false.
 
 enabled_exchange_set(Exchanges) ->
     maps:from_list([{maps:get(id, E, <<"">>), true} || E <- Exchanges]).
