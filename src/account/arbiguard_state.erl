@@ -43,7 +43,10 @@ handle_call(snapshot, _From, State = #state{paper = Paper}) ->
     {reply, Snapshot, State};
 handle_call({reset_paper, Payload}, _From, State) ->
     Capital = arbiguard_util:to_float(maps:get(capital_usdt, Payload, 10000), 10000),
-    Paper = new_paper(Capital),
+    Req = arbiguard_calc:normalize_request(Payload),
+    Paper0 = new_paper(Capital),
+    Paper1 = ensure_exchange_balances(Paper0, maps:get(exchanges, Req, [])),
+    Paper = refresh_equity(Paper1#{updated_at => iso_now()}),
     {reply, paper_snapshot(Paper), State#state{paper = Paper}};
 handle_call({submit_scan, Req, Result}, _From, State = #state{paper = Paper0}) ->
     Paper = update_paper(Paper0, Req, Result),

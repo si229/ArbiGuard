@@ -129,7 +129,9 @@ route(#{method := <<"POST">>, path := <<"/api/live/token">>, body := Body}) ->
     json_response(200, #{ok => arbiguard_live_account:set_exchange_token(Exchange, Token)});
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
     Payload = safe_decode(Body),
-    json_response(200, arbiguard_state:reset_paper(Payload));
+    ExecutorReset = arbiguard_executor:reset(),
+    Paper = arbiguard_state:reset_paper(Payload),
+    json_response(200, Paper#{executor_reset => ExecutorReset});
 route(#{method := <<"POST">>, path := <<"/api/funding/apply-settings">>, body := Body}) ->
     Payload = safe_decode(Body),
     json_response(200, arbiguard_scanner:apply_settings(Payload));
