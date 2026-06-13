@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0, snapshot/0, set_exchange_token/2, get_exchange_token/1,
-         submit_order/2, report_fill/2, set_enabled/1]).
+         submit_order/2, report_fill/2, report_funding_settlement/2, set_enabled/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {enabled = false, tokens = #{}, orders = #{}, logs = []}).
@@ -27,6 +27,9 @@ submit_order(Req, Order) ->
 
 report_fill(OrderID, Fill) ->
     gen_server:call(?MODULE, {report_fill, OrderID, Fill}).
+
+report_funding_settlement(PositionID, Settlement) ->
+    gen_server:call(?MODULE, {report_funding_settlement, PositionID, Settlement}).
 
 init([]) ->
     {ok, #state{}}.
@@ -104,6 +107,28 @@ handle_call({report_fill, OrderID0, Fill0}, _From, State = #state{orders = Order
             {reply, sanitize_order(Order), State#state{orders = Orders#{OrderID => Order},
                                                        logs = lists:sublist([Log | Logs], 500)}}
     end;
+handle_call({report_funding_settlement, PositionID0, Settlement0}, _From, State = #state{logs = Logs}) ->
+    PositionID = arbiguard_util:to_binary(PositionID0),
+    Now = arbiguard_util:now_ms(),
+    SettlementBase = normalize_funding_settlement(Settlement0),
+    Settlement = SettlementBase#{
+        position_id => PositionID,
+        time => maps:get(time, SettlementBase, Now)
+    },
+    arbiguard_close_executor ! {live_funding_settlement, PositionID, Settlement},
+    Log = #{time => Now,
+            action => <<"live_funding_settlement">>,
+            position_id => PositionID,
+            symbol => maps:get(symbol, Settlement, <<"">>),
+            exchange => maps:get(exchange, Settlement, <<"">>),
+            side => maps:get(side, Settlement, <<"">>),
+            funding_pnl => maps:get(funding_pnl, Settlement, 0.0),
+            funding_rate => maps:get(funding_rate, Settlement, 0.0)},
+    lager:info("live funding settlement position=~s exchange=~s symbol=~s side=~s pnl=~p rate=~p",
+               [PositionID, maps:get(exchange, Settlement, <<"">>), maps:get(symbol, Settlement, <<"">>),
+                maps:get(side, Settlement, <<"">>), maps:get(funding_pnl, Settlement, 0.0),
+                maps:get(funding_rate, Settlement, 0.0)]),
+    {reply, #{ok => true, settlement => Settlement}, State#state{logs = lists:sublist([Log | Logs], 500)}};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -130,6 +155,17 @@ truthy(_) -> false.
 normalize_fill(Fill0) ->
     Fill = case is_map(Fill0) of true -> Fill0; false -> #{} end,
     Fill#{filled_notional => arbiguard_util:to_float(maps:get(filled_notional, Fill, maps:get(notional, Fill, 0.0)), 0.0)}.
+
+normalize_funding_settlement(Settlement0) ->
+    Settlement = case is_map(Settlement0) of true -> Settlement0; false -> #{} end,
+    Settlement#{
+        exchange => norm_exchange(maps:get(exchange, Settlement, <<"">>)),
+        symbol => string:uppercase(arbiguard_util:to_binary(maps:get(symbol, Settlement, <<"">>))),
+        side => string:lowercase(arbiguard_util:to_binary(maps:get(side, Settlement, <<"">>))),
+        funding_pnl => arbiguard_util:to_float(maps:get(funding_pnl, Settlement, maps:get(amount, Settlement, 0.0)), 0.0),
+        funding_rate => arbiguard_util:to_float(maps:get(funding_rate, Settlement, 0.0), 0.0),
+        funding_time => arbiguard_util:to_int(maps:get(funding_time, Settlement, maps:get(time, Settlement, 0)), 0)
+    }.
 
 maybe_notify_owner(Order) ->
     case maps:get(owner_pid, Order, undefined) of

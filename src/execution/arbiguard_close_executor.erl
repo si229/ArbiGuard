@@ -52,6 +52,32 @@ handle_info({live_order_update, OrderUpdate}, State = #state{orders = Orders}) -
         <<"partial_filled">> -> maybe_finish_or_continue(Parent, State);
         _ -> {noreply, State#state{orders = Orders#{ID => Parent}}}
     end;
+handle_info({live_funding_settlement, PositionID, Settlement}, State = #state{orders = Orders}) ->
+    {FoundID, FoundOrder} = find_order_by_position(PositionID, Settlement, Orders),
+    case FoundID of
+        undefined ->
+            lager:warning("close executor live funding settlement unmatched position=~s exchange=~s symbol=~s side=~s",
+                          [PositionID, maps:get(exchange, Settlement, <<"">>),
+                           maps:get(symbol, Settlement, <<"">>), maps:get(side, Settlement, <<"">>)]),
+            {noreply, State};
+        _ ->
+            Position0 = maps:get(position, FoundOrder, #{}),
+            Position = evaluate_position_strategy(apply_live_funding_settlement(Position0, Settlement),
+                                                  maps:get(req, FoundOrder, #{})),
+            Order1 = FoundOrder#{position => maps:without([should_close], Position),
+                                 close_rule => maps:get(close_rule, Position, <<"watch">>)},
+            Order2 = case maps:get(should_close, Position, false) of
+                true ->
+                    Req = arbiguard_calc:normalize_request(maps:get(req, FoundOrder, #{})),
+                    CloseOrder = close_plan(Req, Position),
+                    dispatch_close(Req, CloseOrder#{status => <<"waiting_ws_ticker">>,
+                                                    req => Req,
+                                                    position => Position,
+                                                    close_rule => maps:get(close_rule, Position, <<"live_funding_strategy_close">>)});
+                false -> Order1
+            end,
+            {noreply, State#state{orders = Orders#{FoundID => Order2}}}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -211,7 +237,7 @@ maybe_close_tracked_position(Order, Cache) ->
     case enrich_close_from_cache(Position0, Cache) of
         {ok, Position1} ->
             Req = arbiguard_calc:normalize_request(maps:get(req, Order, #{})),
-            Position = evaluate_position_strategy(settle_funding(Position1), Req),
+            Position = evaluate_position_strategy(maybe_settle_funding(Position1), Req),
             case maps:get(should_close, Position, false) of
                 true ->
                     CloseOrder = close_plan(Req, Position),
@@ -225,6 +251,13 @@ maybe_close_tracked_position(Order, Cache) ->
             end;
         wait ->
             Order
+    end.
+
+maybe_settle_funding(Position) ->
+    case maps:get(account_mode, Position, <<"paper">>) of
+        <<"live">> -> recompute_position_pnl(Position);
+        live -> recompute_position_pnl(Position);
+        _ -> settle_funding(Position)
     end.
 
 maybe_submit_close_from_ticker(Order, Cache) ->
@@ -500,6 +533,54 @@ min_positive(A, B) -> min(A, B).
 
 f(V, D) ->
     arbiguard_util:to_float(V, D).
+
+apply_live_funding_settlement(Position0, Settlement) ->
+    Side = maps:get(side, Settlement, <<"">>),
+    PNL = f(maps:get(funding_pnl, Settlement, 0), 0),
+    Rate = f(maps:get(funding_rate, Settlement, 0), 0),
+    Time = arbiguard_util:to_int(maps:get(funding_time, Settlement, maps:get(time, Settlement, arbiguard_util:now_ms())), arbiguard_util:now_ms()),
+    Position1 = Position0#{funding_pnl => f(maps:get(funding_pnl, Position0, 0), 0) + PNL,
+                           last_funding_settlement_pnl => PNL,
+                           last_funding_settled_at => Time,
+                           last_live_funding_settlement => Settlement},
+    Position2 = case Side of
+        <<"long">> ->
+            Position1#{long_funding_rate => choose_nonzero(Rate, maps:get(long_funding_rate, Position1, 0)),
+                       long_funding_settlement_count => maps:get(long_funding_settlement_count, Position1, 0) + 1};
+        <<"short">> ->
+            Position1#{short_funding_rate => choose_nonzero(Rate, maps:get(short_funding_rate, Position1, 0)),
+                       short_funding_settlement_count => maps:get(short_funding_settlement_count, Position1, 0) + 1};
+        _ ->
+            Position1#{funding_settlement_count => maps:get(funding_settlement_count, Position1, 0) + 1}
+    end,
+    recompute_position_pnl(Position2).
+
+choose_nonzero(Value, Fallback) when abs(Value) =< 0.0 -> Fallback;
+choose_nonzero(Value, _Fallback) -> Value.
+
+find_order_by_position(PositionID0, Settlement, Orders) ->
+    PositionID = arbiguard_util:to_binary(PositionID0),
+    Matches = [{ID, Order} || {ID, Order} <- maps:to_list(Orders),
+                             funding_settlement_matches(PositionID, Settlement, Order)],
+    case Matches of
+        [{ID1, Order1} | _] -> {ID1, Order1};
+        [] -> {undefined, #{}}
+    end.
+
+funding_settlement_matches(PositionID, Settlement, Order) ->
+    Position = maps:get(position, Order, #{}),
+    PositionIDs = [maps:get(id, Position, <<"">>), maps:get(position_id, Position, <<"">>),
+                   maps:get(id, Order, <<"">>)],
+    ByID = PositionID =/= <<"">> andalso lists:member(PositionID, PositionIDs),
+    Symbol = maps:get(symbol, Settlement, <<"">>),
+    Exchange = maps:get(exchange, Settlement, <<"">>),
+    Side = maps:get(side, Settlement, <<"">>),
+    ByLeg = Symbol =/= <<"">> andalso Symbol =:= maps:get(symbol, Position, <<"">>) andalso
+            ((Side =:= <<"long">> andalso Exchange =:= maps:get(long_exchange, Position, <<"">>)) orelse
+             (Side =:= <<"short">> andalso Exchange =:= maps:get(short_exchange, Position, <<"">>)) orelse
+             (Side =:= <<"">> andalso (Exchange =:= maps:get(long_exchange, Position, <<"">>) orelse
+                                      Exchange =:= maps:get(short_exchange, Position, <<"">>)))),
+    ByID orelse ByLeg.
 
 ticker_from_symbol_cache_or_ets(Exchange, Symbol, SymbolRows) ->
     case maps:get(Exchange, SymbolRows, undefined) of

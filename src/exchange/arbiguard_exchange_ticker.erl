@@ -147,11 +147,15 @@ do_start_ws(State) ->
     end.
 
 connect_ws(State, Host, Port, Path) ->
-    case gun:open(binary_to_list(Host), Port, #{transport => tls}) of
+    HostName = binary_to_list(Host),
+    OpenOpts = #{transport => tls,
+                 protocols => [http],
+                 tls_opts => [{server_name, HostName}]},
+    case gun:open(HostName, Port, OpenOpts) of
         {ok, ConnPid} ->
             case gun:await_up(ConnPid, 10000) of
                 {ok, _Protocol} ->
-                    StreamRef = gun:ws_upgrade(ConnPid, binary_to_list(Path)),
+                    StreamRef = gun:ws_upgrade(ConnPid, binary_to_list(Path), ws_headers(State, Host)),
                     await_ws_upgrade(State, ConnPid, StreamRef, Host, Path);
                 {error, Reason} ->
                     lager:warning("ticker ws await_up failed exchange=~s reason=~p", [State#state.id, Reason]),
@@ -174,13 +178,49 @@ await_ws_upgrade(State, ConnPid, StreamRef, Host, Path) ->
         Other ->
             lager:warning("ticker ws upgrade failed exchange=~s result=~p", [State#state.id, Other]),
             catch gun:close(ConnPid),
-            reconnect(State, fmt(Other))
+            reconnect(State, ws_upgrade_error(Other))
     end.
+
+ws_upgrade_error({response, _Fin, Status, Headers}) ->
+    unicode:characters_to_binary(io_lib:format("ws_upgrade_http_~p ~p", [Status, compact_headers(Headers)]));
+ws_upgrade_error(timeout) ->
+    <<"ws_upgrade_timeout">>;
+ws_upgrade_error(Other) ->
+    fmt(Other).
+
+compact_headers(Headers) when is_list(Headers) ->
+    lists:sublist(Headers, 5);
+compact_headers(Headers) ->
+    Headers.
 
 reconnect(State, Reason) ->
     erlang:send_after(3000, self(), start_ws),
     State#state{ws_enabled = true, ws_connected = false, ws_status = <<"reconnecting">>, ws_error = Reason,
                 ws_conn = undefined, ws_stream = undefined}.
+
+ws_headers(#state{id = <<"okx">>}, Host) ->
+    [{<<"host">>, Host},
+     {<<"user-agent">>, <<"ArbiGuard/0.1">>},
+     {<<"origin">>, <<"https://www.okx.com">>}];
+ws_headers(#state{id = <<"binance">>}, Host) ->
+    [{<<"host">>, Host},
+     {<<"user-agent">>, <<"ArbiGuard/0.1">>},
+     {<<"origin">>, <<"https://www.binance.com">>}];
+ws_headers(#state{id = <<"gate">>}, Host) ->
+    [{<<"host">>, Host},
+     {<<"user-agent">>, <<"ArbiGuard/0.1">>},
+     {<<"origin">>, <<"https://www.gate.io">>}];
+ws_headers(#state{id = <<"htx">>}, Host) ->
+    [{<<"host">>, Host},
+     {<<"user-agent">>, <<"ArbiGuard/0.1">>},
+     {<<"origin">>, <<"https://www.htx.com">>}];
+ws_headers(#state{id = <<"weex">>}, Host) ->
+    [{<<"host">>, Host},
+     {<<"user-agent">>, <<"ArbiGuard/0.1">>},
+     {<<"origin">>, <<"https://www.weex.com">>}];
+ws_headers(_State, Host) ->
+    [{<<"host">>, Host},
+     {<<"user-agent">>, <<"ArbiGuard/0.1">>}].
 
 close_ws(State = #state{ws_conn = undefined}) ->
     State;
