@@ -6,7 +6,7 @@
 
 -record(state, {exchange, id, subscriptions = #{}, ws_enabled = false,
                 ws_connected = false, ws_status = <<"stopped">>, ws_error = undefined,
-                ws_conn = undefined, ws_stream = undefined}).
+                ws_conn = undefined, ws_stream = undefined, heartbeat_ref = undefined}).
 
 start_link(Exchange) ->
     ID = maps:get(id, Exchange),
@@ -122,6 +122,11 @@ handle_info({gun_ws, _ConnPid, _StreamRef, {text, Data}}, State) ->
 handle_info({gun_ws, _ConnPid, _StreamRef, {binary, Data}}, State) ->
     handle_ws_payload(maybe_gunzip(Data), State),
     {noreply, State};
+handle_info(ws_heartbeat, State = #state{ws_connected = true}) ->
+    send_ws_heartbeat(State),
+    {noreply, schedule_heartbeat(State)};
+handle_info(ws_heartbeat, State) ->
+    {noreply, State#state{heartbeat_ref = undefined}};
 handle_info({gun_down, ConnPid, _Proto, Reason, _KilledStreams}, State = #state{ws_conn = ConnPid}) ->
     lager:warning("ticker ws down exchange=~s reason=~p", [State#state.id, Reason]),
     erlang:send_after(3000, self(), start_ws),
@@ -181,7 +186,7 @@ await_ws_upgrade(State, ConnPid, StreamRef, Host, Path) ->
                                     ws_status = <<"connected">>, ws_error = undefined,
                                     ws_conn = ConnPid, ws_stream = StreamRef},
             lager:info("ticker ws connected exchange=~s host=~s path=~s", [State#state.id, Host, Path]),
-            replay_subscriptions(Connected);
+            replay_subscriptions(schedule_heartbeat(Connected));
         Other ->
             lager:warning("ticker ws upgrade failed exchange=~s result=~p", [State#state.id, Other]),
             catch gun:close(ConnPid),
@@ -250,7 +255,9 @@ maybe_ws_subscribe(State = #state{ws_connected = true, ws_conn = ConnPid, ws_str
     case subscribe_payload(State#state.id, Symbol) of
         undefined -> State;
         Payload ->
-            ok = gun:ws_send(ConnPid, StreamRef, {text, Payload}),
+            SendResult = catch gun:ws_send(ConnPid, StreamRef, {text, Payload}),
+            lager:info("ticker ws subscribe sent exchange=~s symbol=~s result=~p payload=~s",
+                       [State#state.id, Symbol, SendResult, Payload]),
             State
     end;
 maybe_ws_subscribe(State, _Symbol) ->
@@ -260,11 +267,28 @@ maybe_ws_unsubscribe(State = #state{ws_connected = true, ws_conn = ConnPid, ws_s
     case unsubscribe_payload(State#state.id, Symbol) of
         undefined -> State;
         Payload ->
-            ok = gun:ws_send(ConnPid, StreamRef, {text, Payload}),
+            SendResult = catch gun:ws_send(ConnPid, StreamRef, {text, Payload}),
+            lager:info("ticker ws unsubscribe sent exchange=~s symbol=~s result=~p payload=~s",
+                       [State#state.id, Symbol, SendResult, Payload]),
             State
     end;
 maybe_ws_unsubscribe(State, _Symbol) ->
     State.
+
+schedule_heartbeat(State = #state{heartbeat_ref = Ref}) ->
+    case Ref of
+        undefined -> ok;
+        _ -> erlang:cancel_timer(Ref)
+    end,
+    State#state{heartbeat_ref = erlang:send_after(15000, self(), ws_heartbeat)}.
+
+send_ws_heartbeat(#state{id = <<"okx">>, ws_conn = ConnPid, ws_stream = StreamRef}) ->
+    catch gun:ws_send(ConnPid, StreamRef, {text, <<"ping">>});
+send_ws_heartbeat(#state{id = <<"gate">>, ws_conn = ConnPid, ws_stream = StreamRef}) ->
+    Payload = arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.ping">>}),
+    catch gun:ws_send(ConnPid, StreamRef, {text, Payload});
+send_ws_heartbeat(_State) ->
+    ok.
 
 ws_endpoint(#state{exchange = Exchange}) ->
     Host = maps:get(ws_host, Exchange, <<"">>),
@@ -319,8 +343,9 @@ unsubscribe_payload(_, _Symbol) ->
 
 handle_ws_payload(Data, State) ->
     case decode_ws(Data) of
-        {ok, Msg} ->
+        {ok, Msg} -> 
             maybe_reply_ws(Msg, State),
+            maybe_log_ws_control(Msg, State),
             maybe_write_ticker(Msg, State);
         _ -> ok
     end.
@@ -338,6 +363,22 @@ maybe_reply_ws(Msg, #state{id = <<"htx">>, ws_conn = ConnPid, ws_stream = Stream
     end;
 maybe_reply_ws(_Msg, _State) ->
     ok.
+
+maybe_log_ws_control(Msg, #state{id = ID}) ->
+    case is_ws_control(Msg) of
+        true -> lager:info("ticker ws control exchange=~s msg=~p", [ID, Msg]);
+        false -> ok
+    end.
+
+is_ws_control(Msg) when is_map(Msg) ->
+    has_any_key([event, <<"event">>, status, <<"status">>, subbed, <<"subbed">>, unsubbed, <<"unsubbed">>,
+                 error, <<"error">>, code, <<"code">>, op, <<"op">>], Msg)
+        andalso not has_any_key([data, <<"data">>, tick, <<"tick">>, result, <<"result">>, s, <<"s">>], Msg);
+is_ws_control(_) ->
+    false.
+
+has_any_key(Keys, Msg) ->
+    lists:any(fun(Key) -> maps:is_key(Key, Msg) end, Keys).
 
 maybe_write_ticker(Msg, State = #state{id = <<"binance">> = ID}) ->
     case map_get_any([s, <<"s">>], Msg, undefined) of

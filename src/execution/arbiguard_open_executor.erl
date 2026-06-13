@@ -102,10 +102,17 @@ prune_stale_waiting_orders(CurrentIDs, State = #state{orders = Orders}) ->
     State#state{orders = Kept}.
 
 should_prune_order(ID, Order, CurrentIDs) ->
-    (not maps:is_key(ID, CurrentIDs)) andalso prunable_status(maps:get(status, Order, <<"">>)).
+    (not maps:is_key(ID, CurrentIDs))
+        andalso prunable_status(maps:get(status, Order, <<"">>))
+        andalso stale_wait_expired(Order).
 
 prunable_status(<<"waiting_ws_ticker">>) -> true;
 prunable_status(_Status) -> false.
+
+stale_wait_expired(Order) ->
+    GraceMs = arbiguard_util:to_int(application:get_env(arbiguard, execution_order_stale_grace_ms, 15000), 15000),
+    CreatedAt = arbiguard_util:to_int(maps:get(created_at, Order, 0), 0),
+    CreatedAt =:= 0 orelse arbiguard_util:now_ms() - CreatedAt >= GraceMs.
 
 create_order(Req, Op, State = #state{orders = Orders}) ->
     Req1 = arbiguard_calc:normalize_request(Req),
