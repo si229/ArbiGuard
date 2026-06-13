@@ -161,17 +161,6 @@ submit_error(Result) when is_map(Result) ->
 submit_error(_Result) ->
     <<"submit_exception">>.
 
-live_status(LiveResult, Awaiting) when is_map(LiveResult) ->
-    case maps:get(status, LiveResult, <<"">>) of
-        <<"awaiting_fill">> -> Awaiting;
-        <<"partial_filled">> -> <<"partial_live_close_continue">>;
-        <<"filled">> -> <<"filled_live_close">>;
-        <<"rejected">> -> <<"submitted_live_rejected">>;
-        _ -> Awaiting
-    end;
-live_status(_Other, _Awaiting) ->
-    <<"submitted_live_error">>.
-
 maybe_dispatch_ready_orders(State = #state{orders = Orders, ticker_cache = Cache}) ->
     NewOrders = maps:map(fun(_ID, Order) -> maybe_dispatch_order(Order, Cache) end, Orders),
     State#state{orders = NewOrders}.
@@ -277,9 +266,6 @@ ticker_from_symbol_cache_or_ets(Exchange, Symbol, SymbolRows) ->
 
 public_order(Order) ->
     maps:without([req, position], Order).
-
-merge_order(Old, Update) ->
-    maps:merge(Old, Update).
 
 apply_live_child_update(Parent, Update) ->
     ChildID = maps:get(id, Update, <<"">>),
