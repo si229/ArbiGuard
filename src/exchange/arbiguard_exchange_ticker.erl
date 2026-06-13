@@ -400,7 +400,7 @@ maybe_write_ticker(Msg, State = #state{id = <<"binance">> = ID}) ->
             write_ticker(ID, Symbol, Bid, Ask, 0, 0, <<"not_in_bookticker">>, State)
     end;
 maybe_write_ticker(Msg, State = #state{id = <<"okx">> = ID}) ->
-    Data = map_get_any([data, <<"data">>], Msg, []),
+    Data = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
     [write_ticker(ID,
                   undo_okx_symbol(map_get_any([instId, <<"instId">>], Row, <<"">>)),
                   arbiguard_util:to_float(map_get_any([bidPx, <<"bidPx">>], Row, 0), 0),
@@ -412,8 +412,7 @@ maybe_write_ticker(Msg, State = #state{id = <<"okx">> = ID}) ->
      || Row <- Data],
     ok;
 maybe_write_ticker(Msg, State = #state{id = <<"gate">> = ID}) ->
-    Rows0 = map_get_any([result, <<"result">>], Msg, []),
-    Rows = case is_list(Rows0) of true -> Rows0; false -> [Rows0] end,
+    Rows = rows_from_value(map_get_any([result, <<"result">>], Msg, [])),
     [write_ticker(ID,
                   undo_gate_symbol(map_get_any([contract, <<"contract">>], Row, <<"">>)),
                   arbiguard_util:to_float(map_get_any([highest_bid, bid1, <<"highest_bid">>, <<"bid1">>], Row, 0), 0),
@@ -434,8 +433,7 @@ maybe_write_ticker(Msg, State = #state{id = <<"htx">> = ID}) ->
     Mark = arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Tick, 0), 0),
     case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, Last, Mark, <<"ws_ticker">>, State) end;
 maybe_write_ticker(Msg, State = #state{id = <<"weex">> = ID}) ->
-    Rows0 = map_get_any([data, <<"data">>], Msg, []),
-    Rows = case is_list(Rows0) of true -> Rows0; false -> [Rows0] end,
+    Rows = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
     [write_ticker(ID,
                   map_get_any([symbol, instId, <<"symbol">>, <<"instId">>], Row, <<"">>),
                   arbiguard_util:to_float(map_get_any([bidPr, bid, bidPx, bestBid, <<"bidPr">>, <<"bid">>, <<"bidPx">>, <<"bestBid">>], Row, 0), 0),
@@ -555,11 +553,20 @@ exchange_ws_reason(_) -> false.
 
 map_get_any([], _Map, Default) ->
     Default;
+map_get_any(_Keys, Map, Default) when not is_map(Map) ->
+    Default;
 map_get_any([Key | Rest], Map, Default) ->
     case maps:find(Key, Map) of
         {ok, Value} -> Value;
         error -> map_get_any(Rest, Map, Default)
     end.
+
+rows_from_value(Rows) when is_list(Rows) ->
+    [Row || Row <- Rows, is_map(Row)];
+rows_from_value(Row) when is_map(Row) ->
+    [Row];
+rows_from_value(_) ->
+    [].
 
 maybe_gunzip(Data) ->
     try zlib:gunzip(Data)
