@@ -180,8 +180,13 @@ monitor_mode(Ops) ->
 max_position_usdt(Req) ->
     Capital = maps:get(capital_usdt, Req, 10000.0),
     Pct = maps:get(max_position_pct, Req, 0.1),
-    Exec = maps:get(execution_notional_usdt, Req, 200.0),
-    max(Exec, Capital * Pct).
+    Margin = maps:get(execution_notional_usdt, Req, 200.0),
+    Leverage = max(1.0, maps:get(paper_leverage, Req, 10.0)),
+    MarginCap = case Pct > 0 of
+        true -> Capital * Pct;
+        false -> Margin
+    end,
+    max(0.0, min(Margin, MarginCap) * Leverage).
 
 lower(V) -> string:lowercase(arbiguard_util:to_binary(V)).
 upper(V) -> string:uppercase(arbiguard_util:to_binary(V)).

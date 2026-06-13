@@ -201,8 +201,13 @@ seconds_until(Ms) -> max(0, (Ms - arbiguard_util:now_ms()) div 1000).
 max_position_usdt(Req) ->
     Capital = f(maps:get(capital_usdt, Req, 10000), 10000),
     Pct = f(maps:get(max_position_pct, Req, 0.1), 0.1),
-    Exec = f(maps:get(execution_notional_usdt, Req, 200), 200),
-    max(Exec, Capital * Pct).
+    Margin = f(maps:get(execution_notional_usdt, Req, 200), 200),
+    Leverage = max(1.0, f(maps:get(paper_leverage, Req, 10), 10)),
+    MarginCap = case Pct > 0 of
+        true -> Capital * Pct;
+        false -> Margin
+    end,
+    max(0.0, min(Margin, MarginCap) * Leverage).
 
 normalize_window(V) when V =< 0 -> 8;
 normalize_window(V) when V > 24 -> max(1, V / 3600);
