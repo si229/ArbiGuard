@@ -44,7 +44,7 @@ default_exchanges() ->
        base_url => <<"https://api.gateio.ws/api/v4">>,
        ws_host => <<"fx-ws.gateio.ws">>, ws_port => 443, ws_path => <<"/v4/ws/usdt">>,
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
-     #{id => <<"weex">>, name => <<"WEEX">>, enabled => true,
+     #{id => <<"weex">>, name => <<"WEEX">>, enabled => false,
        base_url => <<"https://api-contract.weex.com">>,
        ws_host => <<"ws-contract.weex.com">>, ws_port => 443, ws_path => <<"/v3/ws/public">>,
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, funding_interval_hours => 8},
