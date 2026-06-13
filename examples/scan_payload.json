@@ -1,0 +1,35 @@
+{
+  "capital_usdt": 10000,
+  "max_position_pct": 0.1,
+  "execution_notional_usdt": 200,
+  "min_funding_rate": 0.0003,
+  "min_price_gap_rate": 0.002,
+  "max_basis_rate": 0.02,
+  "min_execution_profit_usdt": 5,
+  "price_gap_close_profit_usdt": 10,
+  "paper_leverage": 10,
+  "limit": 20,
+  "execution_order_mode": "fok",
+  "market_snapshots": [
+    {
+      "exchange": "htx",
+      "symbol": "NOTUSDT",
+      "mark_price": 0.0004692,
+      "funding_rate": 0.0001,
+      "next_funding_time": 1781330400000,
+      "funding_interval_hours": 8,
+      "taker_fee_rate": 0.0005,
+      "quote_volume": 10000000
+    },
+    {
+      "exchange": "gate",
+      "symbol": "NOTUSDT",
+      "mark_price": 0.0004750,
+      "funding_rate": 0.00005,
+      "next_funding_time": 1781316000000,
+      "funding_interval_hours": 4,
+      "taker_fee_rate": 0.0005,
+      "quote_volume": 10000000
+    }
+  ]
+}

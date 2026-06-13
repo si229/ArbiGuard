@@ -24,6 +24,13 @@ Default HTTP port:
 http://127.0.0.1:8771
 ```
 
+Or:
+
+```powershell
+cd E:\contract\ArbiGuard
+.\scripts\start.ps1 -Port 8771
+```
+
 ## APIs
 
 ```text
@@ -31,6 +38,13 @@ GET  /api/health
 GET  /api/funding/state
 POST /api/funding/scan
 POST /api/funding/paper/reset
+```
+
+Example scan with local snapshots:
+
+```powershell
+$body = Get-Content .\examples\scan_payload.json -Raw
+Invoke-RestMethod http://127.0.0.1:8771/api/funding/scan -Method POST -ContentType application/json -Body $body
 ```
 
 ## Notes
