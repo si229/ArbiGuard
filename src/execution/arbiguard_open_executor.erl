@@ -34,7 +34,10 @@ handle_call(_Req, _From, State) ->
 
 handle_cast({opportunities, Req, Result}, State) ->
     Opportunities = maps:get(opportunities, Result, []),
-    NewState = lists:foldl(fun(Op, Acc) -> maybe_create_execution_order(Req, Op, Acc) end, State, Opportunities),
+    Req1 = arbiguard_calc:normalize_request(Req),
+    CurrentIDs = opportunity_id_set(Req1, Opportunities),
+    PrunedState = prune_stale_waiting_orders(CurrentIDs, State),
+    NewState = lists:foldl(fun(Op, Acc) -> maybe_create_execution_order(Req1, Op, Acc) end, PrunedState, Opportunities),
     {noreply, NewState#state{last_opportunities = Opportunities, last_notify = arbiguard_util:now_ms()}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -66,8 +69,8 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
-    MinProfit = maps:get(min_execution_profit_usdt, arbiguard_calc:normalize_request(Req), 5.0),
     Req1 = arbiguard_calc:normalize_request(Req),
+    MinProfit = maps:get(min_execution_profit_usdt, Req1, 5.0),
     ID = order_key(Req1, Op),
     case maps:get(estimated_net_profit, Op, 0) >= MinProfit andalso not maps:is_key(ID, Orders) of
         true ->
@@ -79,6 +82,30 @@ maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
         false ->
             State
     end.
+
+opportunity_id_set(Req, Opportunities) ->
+    maps:from_list([{order_key(Req, Op), true} || Op <- Opportunities]).
+
+prune_stale_waiting_orders(CurrentIDs, State = #state{orders = Orders}) ->
+    Kept = maps:fold(fun(ID, Order, Acc) ->
+        case should_prune_order(ID, Order, CurrentIDs) of
+            true ->
+                unsubscribe_order_symbols(Order),
+                lager:info("open executor pruned stale order id=~s symbol=~s long=~s short=~s",
+                           [ID, maps:get(symbol, Order, <<"">>), maps:get(long_exchange, Order, <<"">>),
+                            maps:get(short_exchange, Order, <<"">>)]),
+                Acc;
+            false ->
+                Acc#{ID => Order}
+        end
+    end, #{}, Orders),
+    State#state{orders = Kept}.
+
+should_prune_order(ID, Order, CurrentIDs) ->
+    (not maps:is_key(ID, CurrentIDs)) andalso prunable_status(maps:get(status, Order, <<"">>)).
+
+prunable_status(<<"waiting_ws_ticker">>) -> true;
+prunable_status(_Status) -> false.
 
 create_order(Req, Op, State = #state{orders = Orders}) ->
     Req1 = arbiguard_calc:normalize_request(Req),

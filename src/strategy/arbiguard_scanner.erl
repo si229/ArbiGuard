@@ -89,14 +89,7 @@ merge_ets_market(Enabled) ->
     [merge_ticker(Row, Ticker)
      || Row <- FundingRows,
         maps:is_key(maps:get(exchange, Row, <<"">>), Enabled),
-        Ticker <- [maps:get({maps:get(exchange, Row, <<"">>), maps:get(symbol, Row, <<"">>)}, TickerByKey, #{})],
-        live_ticker_ready(Ticker)].
-
-live_ticker_ready(Ticker) when is_map(Ticker), map_size(Ticker) > 0 ->
-    arbiguard_util:to_float(maps:get(bid, Ticker, 0), 0) > 0 andalso
-    arbiguard_util:to_float(maps:get(ask, Ticker, 0), 0) > 0;
-live_ticker_ready(_Ticker) ->
-    false.
+        Ticker <- [maps:get({maps:get(exchange, Row, <<"">>), maps:get(symbol, Row, <<"">>)}, TickerByKey, #{})]].
 
 enabled_exchange_set(Exchanges) ->
     maps:from_list([{maps:get(id, E, <<"">>), true} || E <- Exchanges]).
