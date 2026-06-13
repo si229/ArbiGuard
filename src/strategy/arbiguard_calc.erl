@@ -205,6 +205,7 @@ max_position_usdt(Req) ->
     max(Exec, Capital * Pct).
 
 normalize_window(V) when V =< 0 -> 8;
+normalize_window(V) when V > 24 -> max(1, V / 3600);
 normalize_window(V) -> max(1, V).
 
 delist_risk(Leg) ->

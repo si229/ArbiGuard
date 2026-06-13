@@ -57,7 +57,7 @@ gate_row(Exchange, I) ->
       index_price => f(maps:get(index_price, I, 0), 0),
       funding_rate => f(maps:get(funding_rate, I, 0), 0),
       next_funding_time => arbiguard_util:to_int(maps:get(funding_next_apply, I, 0), 0) * 1000,
-      funding_interval_hours => f(maps:get(funding_interval, I, maps:get(funding_interval_hours, Exchange, 8)), 8),
+      funding_interval_hours => normalize_interval(f(maps:get(funding_interval, I, maps:get(funding_interval_hours, Exchange, 8)), 8)),
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
       quote_volume => f(maps:get(volume_24h_quote, I, maps:get(volume_24h_settle, I, 0)), 0),
