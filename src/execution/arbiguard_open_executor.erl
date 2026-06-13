@@ -447,10 +447,9 @@ public_order(Order) ->
     Target = maps:get(target_notional, Order, 0.0),
     Status = maps:get(status, Order, <<"">>),
     Confirmed0 = maps:get(confirmed_notional, Order, 0.0),
-    Confirmed = case {Confirmed0, filled_status(Status)} of
-        {0.0, true} -> Target;
-        {0, true} -> Target;
-        _ -> Confirmed0
+    Confirmed = case filled_status(Status) andalso abs(Confirmed0) =< 0.0 of
+        true -> Target;
+        false -> Confirmed0
     end,
     Pending = pending_notional(maps:get(pending_submissions, Order, #{})),
     Remaining0 = maps:get(remaining_notional, Order, max(0.0, Target - Confirmed - Pending)),
