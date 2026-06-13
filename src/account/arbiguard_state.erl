@@ -153,7 +153,7 @@ refresh_position(Pos, Op) ->
     PricePNL = (LongPrice - maps:get(long_entry_price, Pos, 0)) * LongQty +
                (maps:get(short_entry_price, Pos, 0) - ShortPrice) * ShortQty,
     FundingPNL = maps:get(funding_pnl, Pos, 0),
-    CloseFee = maps:get(close_fee, Pos, 0),
+    CloseFee = estimated_close_fee(Pos),
     Pos#{
         long_current_price => LongPrice,
         short_current_price => ShortPrice,
@@ -308,7 +308,7 @@ close_position(Paper, Key, Position, Reason) ->
     PricePNL = (LongClose - maps:get(long_entry_price, Pos, 0)) * LongQty +
                (maps:get(short_entry_price, Pos, 0) - ShortClose) * ShortQty,
     FundingPNL = maps:get(funding_pnl, Pos, 0),
-    CloseFee = maps:get(close_fee, Pos, Notional * (maps:get(long_fee_rate, Pos, 0.0005) + maps:get(short_fee_rate, Pos, 0.0005))),
+    CloseFee = estimated_close_fee(Pos#{notional => Notional}),
     NetPNL = PricePNL + FundingPNL - CloseFee,
     LongMargin = maps:get(long_margin, Pos, Notional / max(1.0, maps:get(leverage, Pos, 10.0))),
     ShortMargin = maps:get(short_margin, Pos, Notional / max(1.0, maps:get(leverage, Pos, 10.0))),
@@ -506,6 +506,18 @@ max_position(Req) ->
 
 safe_div(_A, B) when B =< 0 -> 0.0;
 safe_div(A, B) -> A / B.
+
+estimated_close_fee(Pos) ->
+    Existing = maps:get(close_fee, Pos, 0),
+    case Existing > 0 of
+        true ->
+            Existing;
+        false ->
+            Notional = maps:get(notional, Pos, maps:get(notional_usdt, Pos, 0)),
+            LongRate = maps:get(long_fee_rate, Pos, 0.0005),
+            ShortRate = maps:get(short_fee_rate, Pos, 0.0005),
+            Notional * (LongRate + ShortRate)
+    end.
 
 long_liquidation_price(Entry, Leverage) ->
     case Entry > 0 andalso Leverage > 0 of

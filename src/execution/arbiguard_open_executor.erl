@@ -212,10 +212,12 @@ dispatch_order(Req0, Order, Op) ->
                 _ -> #{}
             end,
             OpenFee = maps:get(open_fee, Position, maps:get(open_fee, Op, 0.0)),
+            PaperFilledNotional = maps:get(submit_notional, Order, maps:get(target_notional, Order, 0.0)),
             FilledOrder = Order#{status => <<"filled_paper_open">>,
                                  wait_reason => <<"filled">>,
                                  wait_detail => execution_ticker_detail(Op),
-                                 confirmed_notional => maps:get(target_notional, Order, 0.0),
+                                 target_notional => PaperFilledNotional,
+                                 confirmed_notional => PaperFilledNotional,
                                  remaining_notional => 0.0,
                                  long_filled_qty => maps:get(long_qty, Position, maps:get(long_target_qty, Order, 0.0)),
                                  short_filled_qty => maps:get(short_qty, Position, maps:get(short_target_qty, Order, 0.0)),
@@ -240,13 +242,14 @@ maybe_unsubscribe_after_dispatch(Order) ->
 submit_live_child_order(Req, Order, AwaitingStatus) ->
     ParentID = maps:get(id, Order),
     Remaining = remaining_to_submit(Order),
+    BatchNotional = min(Remaining, maps:get(submit_notional, Order, Remaining)),
     ChildID = child_order_id(ParentID),
     ChildOrder = Order#{id => ChildID,
                         parent_id => ParentID,
                         execution_order_id => ParentID,
                         owner_pid => self(),
-                        target_notional => Remaining,
-                        requested_notional => Remaining},
+                        target_notional => BatchNotional,
+                        requested_notional => BatchNotional},
     LiveResult = catch arbiguard_live_account:submit_order(Req, ChildOrder),
     case live_submit_accepted(LiveResult) of
         true ->
@@ -315,9 +318,9 @@ maybe_submit_from_ticker_1(Order, Cache) ->
                         maps:get(short_exchange, Op, <<"">>), maps:get(long_price, Op, 0),
                         maps:get(short_price, Op, 0), maps:get(long_mark_price, Op, 0),
                         maps:get(short_mark_price, Op, 0), maps:get(suggested_notional, Op, 0)]),
-            Order1 = public_order(apply_remaining_order(Order)),
+            Order1 = public_order(Order),
             DispatchNotional = maps:get(suggested_notional, Op, maps:get(target_notional, Order1, 0.0)),
-            dispatch_order(Req, Order1#{target_notional => DispatchNotional}, Op);
+            dispatch_order(Req, Order1#{submit_notional => DispatchNotional}, Op);
         {wait, WaitInfo} ->
             Order#{wait_reason => maps:get(reason, WaitInfo, <<"waiting_ws_ticker">>),
                    wait_detail => WaitInfo,
@@ -325,13 +328,6 @@ maybe_submit_from_ticker_1(Order, Cache) ->
         wait ->
             Order#{wait_reason => <<"waiting_ws_ticker">>,
                    wait_checked_at => arbiguard_util:now_ms()}
-    end.
-
-apply_remaining_order(Order) ->
-    Remaining = remaining_to_submit(Order),
-    case Remaining > 0 of
-        true -> Order#{target_notional => Remaining};
-        false -> Order
     end.
 
 apply_remaining_notional(Op, Order) ->

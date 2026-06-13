@@ -771,3 +771,6 @@ fill_levels([Level | Rest], Target, Notional, Qty) ->
 
 size_key(ask) -> ask_size;
 size_key(bid) -> bid_size.
+
+safe_div(_A, B) when B =< 0 -> 0.0;
+safe_div(A, B) -> A / B.
