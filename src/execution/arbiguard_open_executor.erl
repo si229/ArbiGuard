@@ -141,7 +141,8 @@ dispatch_order(Req0, Order, Op) ->
         live ->
             submit_live_child_order(Req, Order, <<"awaiting_live_open_fill">>);
         _ ->
-            _ = catch arbiguard_state:apply_open_order(Req, Order, Op),
+            ApplyResult = catch arbiguard_state:apply_open_order(Req, Order, Op),
+            maybe_handoff_position_to_close(Req, ApplyResult),
             (public_order(Order))#{status => <<"filled_paper_open">>,
                                    exchange_submit => <<"skipped_paper_account">>,
                                    execution_path => <<"ws_ticker_paper_filled_no_exchange_submit">>,
@@ -349,6 +350,7 @@ maybe_finish_or_continue(Parent, State = #state{orders = Orders}) ->
     case Target > 0 andalso Confirmed >= Target * 0.999 of
         true ->
             Final = Parent#{status => <<"filled_live_open">>, remaining_notional => 0.0},
+            maybe_handoff_position_to_close(maps:get(req, Final, #{}), #{opened_position => order_to_position(Final)}),
             unsubscribe_order_symbols(Final),
             {noreply, State#state{orders = Orders#{ID => Final}}};
         false ->
@@ -392,3 +394,29 @@ update_symbol_cache(Row, Cache) ->
     Exchange = maps:get(exchange, Row, <<"">>),
     SymbolRows0 = maps:get(Symbol, Cache, #{}),
     Cache#{Symbol => SymbolRows0#{Exchange => Row}}.
+
+maybe_handoff_position_to_close(Req, Result) when is_map(Result) ->
+    case maps:get(opened_position, Result, undefined) of
+        Position when is_map(Position) ->
+            _ = catch arbiguard_close_executor:track_position(Req, Position),
+            lager:info("open executor handed position to close executor symbol=~s long=~s short=~s",
+                       [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
+                        maps:get(short_exchange, Position, <<"">>)]),
+            ok;
+        _ -> ok
+    end;
+maybe_handoff_position_to_close(_Req, _Result) ->
+    ok.
+
+order_to_position(Order) ->
+    Notional = maps:get(confirmed_notional, Order, maps:get(target_notional, Order, 0.0)),
+    #{id => maps:get(id, Order, <<"">>),
+      account_mode => maps:get(account_mode, Order, <<"live">>),
+      account_id => maps:get(account_id, Order, <<"live-main">>),
+      symbol => maps:get(symbol, Order, <<"">>),
+      long_exchange => maps:get(long_exchange, Order, <<"">>),
+      short_exchange => maps:get(short_exchange, Order, <<"">>),
+      notional => Notional,
+      notional_usdt => Notional,
+      opened_at => maps:get(created_at, Order, arbiguard_util:now_ms()),
+      updated_at => arbiguard_util:now_ms()}.

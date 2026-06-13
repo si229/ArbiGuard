@@ -48,7 +48,8 @@ handle_call({apply_open_order, Req0, Order, Opportunity}, _From, State = #state{
     Notional = maps:get(target_notional, Order, maps:get(suggested_notional, Opportunity, 0)),
     Paper2 = open_position(Paper1, Req, Key, Opportunity, Notional),
     Paper = refresh_equity(Paper2#{updated_at => iso_now()}),
-    {reply, paper_snapshot(Paper), State#state{paper = Paper}};
+    Snapshot = paper_snapshot(Paper),
+    {reply, Snapshot#{opened_position => position_by_id(Key, Snapshot)}, State#state{paper = Paper}};
 handle_call({set_exchange_token, ExchangeID, TokenConfig}, _From, State) ->
     {reply, arbiguard_live_account:set_exchange_token(ExchangeID, TokenConfig), State};
 handle_call({get_exchange_token, ExchangeID}, _From, State) ->
@@ -292,6 +293,12 @@ paper_snapshot(Paper) ->
         pair_stats => pair_stats(Positions, Logs),
         exchange_equity => exchange_equity(Paper)
     }.
+
+position_by_id(ID, Snapshot) ->
+    case [P || P <- maps:get(positions, Snapshot, []), maps:get(id, P, undefined) =:= ID] of
+        [Position | _] -> Position;
+        [] -> undefined
+    end.
 
 pair_stats(Positions, Logs) ->
     Keys = lists:usort([pair_key(P) || P <- Positions] ++ [pair_key(L) || L <- Logs, maps:get(action, L, <<"">>) =/= <<"skip">>]),

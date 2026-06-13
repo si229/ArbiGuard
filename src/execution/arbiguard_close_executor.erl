@@ -1,7 +1,7 @@
 -module(arbiguard_close_executor).
 -behaviour(gen_server).
 
--export([start_link/0, submit_close/2, snapshot/0]).
+-export([start_link/0, submit_close/2, track_position/2, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {orders = #{}, last_submit = 0, ticker_cache = #{}}).
@@ -11,6 +11,9 @@ start_link() ->
 
 submit_close(Req, Position) ->
     gen_server:call(?MODULE, {submit_close, Req, Position}).
+
+track_position(Req, Position) ->
+    gen_server:call(?MODULE, {track_position, Req, Position}).
 
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
@@ -25,6 +28,16 @@ handle_call({submit_close, Req, Position}, _From, State = #state{orders = Orders
     State1 = maybe_dispatch_ready_orders(State#state{orders = Orders#{maps:get(id, NewOrder) => NewOrder},
                                                      last_submit = arbiguard_util:now_ms()}),
     {reply, public_order(maps:get(maps:get(id, NewOrder), State1#state.orders, NewOrder)), State1};
+handle_call({track_position, Req, Position}, _From, State = #state{orders = Orders}) ->
+    Order = tracking_plan(Req, Position),
+    subscribe_position_symbols(Position),
+    NewOrder = Order#{status => <<"tracking_position">>, req => Req, position => Position},
+    lager:info("close executor tracking position symbol=~s long=~s short=~s account=~s/~s",
+               [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
+                maps:get(short_exchange, Position, <<"">>), maps:get(account_mode, Order, <<"">>),
+                maps:get(account_id, Order, <<"">>)]),
+    {reply, public_order(NewOrder), State#state{orders = Orders#{maps:get(id, NewOrder) => NewOrder},
+                                                last_submit = arbiguard_util:now_ms()}};
 handle_call(snapshot, _From, State) ->
     {reply, #{orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_submit => State#state.last_submit,
@@ -74,6 +87,24 @@ close_plan(Req0, Position) ->
       short_exchange => ShortEx,
       target_notional => maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0)),
       mode => maps:get(close_order_mode, Req, <<"ioc">>),
+      created_at => arbiguard_util:now_ms()}.
+
+tracking_plan(Req0, Position) ->
+    Req = arbiguard_calc:normalize_request(Req0),
+    Symbol = maps:get(symbol, Position, <<"">>),
+    LongEx = maps:get(long_exchange, Position, <<"">>),
+    ShortEx = maps:get(short_exchange, Position, <<"">>),
+    Account = account_scope(Req, Position),
+    #{id => <<(maps:get(id, Account))/binary, "|", (maps:get(mode, Account))/binary, "|",
+              Symbol/binary, "|", LongEx/binary, "|", ShortEx/binary, "|position">>,
+      status => <<"planned_track_position">>,
+      account_mode => maps:get(mode, Account),
+      account_id => maps:get(id, Account),
+      symbol => Symbol,
+      long_exchange => LongEx,
+      short_exchange => ShortEx,
+      target_notional => maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0)),
+      mode => <<"monitor">>,
       created_at => arbiguard_util:now_ms()}.
 
 subscribe_position_symbols(Position) ->

@@ -3,7 +3,7 @@
 -export([snapshot/0]).
 
 snapshot() ->
-    Exchanges = arbiguard_calc:default_exchanges(),
+    Exchanges = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
     #{ets => ets_info(),
       scanner => safe_call(fun arbiguard_scanner:snapshot/0),
       symbol_watcher => safe_call(fun arbiguard_symbol_watcher:snapshot/0),

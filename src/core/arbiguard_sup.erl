@@ -11,7 +11,7 @@ init([]) ->
     ok = arbiguard_ets:init(),
     Port = application:get_env(arbiguard, http_port, 8771),
     Capital = application:get_env(arbiguard, paper_capital_usdt, 10000.0),
-    Exchanges = arbiguard_calc:default_exchanges(),
+    Exchanges = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
     ExchangeChildren = exchange_children(Exchanges),
     CoreChildren = [
         #{id => arbiguard_state,

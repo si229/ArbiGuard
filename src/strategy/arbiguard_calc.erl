@@ -32,11 +32,26 @@ default_scan() ->
     Config#{exchanges => Exchanges}.
 
 default_exchanges() ->
-    [#{id => <<"binance">>, name => <<"Binance">>, enabled => true, base_url => <<"https://fapi.binance.com">>, maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
-     #{id => <<"okx">>, name => <<"OKX">>, enabled => true, base_url => <<"https://www.okx.com">>, maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
-     #{id => <<"gate">>, name => <<"Gate.io">>, enabled => true, base_url => <<"https://api.gateio.ws/api/v4">>, maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
-     #{id => <<"weex">>, name => <<"WEEX">>, enabled => true, base_url => <<"https://api-contract.weex.com">>, maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, funding_interval_hours => 8},
-     #{id => <<"htx">>, name => <<"HTX">>, enabled => true, base_url => <<"https://api.hbdm.com">>, maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8}].
+    [#{id => <<"binance">>, name => <<"Binance">>, enabled => true,
+       base_url => <<"https://fapi.binance.com">>,
+       ws_host => <<"fstream.binance.com">>, ws_port => 443, ws_path => <<"/ws/!bookTicker">>,
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
+     #{id => <<"okx">>, name => <<"OKX">>, enabled => true,
+       base_url => <<"https://www.okx.com">>,
+       ws_host => <<"ws.okx.com">>, ws_port => 8443, ws_path => <<"/ws/v5/public">>,
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
+     #{id => <<"gate">>, name => <<"Gate.io">>, enabled => true,
+       base_url => <<"https://api.gateio.ws/api/v4">>,
+       ws_host => <<"fx-ws.gateio.ws">>, ws_port => 443, ws_path => <<"/v4/ws/usdt">>,
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
+     #{id => <<"weex">>, name => <<"WEEX">>, enabled => true,
+       base_url => <<"https://api-contract.weex.com">>,
+       ws_host => <<"wspap.weex.com">>, ws_port => 443, ws_path => <<"/v2/ws/public">>,
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, funding_interval_hours => 8},
+     #{id => <<"htx">>, name => <<"HTX">>, enabled => true,
+       base_url => <<"https://api.hbdm.com">>,
+       ws_host => <<"api.hbdm.com">>, ws_port => 443, ws_path => <<"/linear-swap-ws">>,
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8}].
 
 normalize_exchanges(Rows) ->
     [normalize_exchange(E) || E <- Rows, maps:get(enabled, E, true) =:= true].
