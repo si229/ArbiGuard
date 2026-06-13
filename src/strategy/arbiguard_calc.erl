@@ -72,7 +72,7 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
     case valid_legs(Req, LongLeg, ShortLeg) of
         false -> false;
         true ->
-            Notional = max_position_usdt(Req),
+            Notional = max_position_usdt(Req, LongLeg, ShortLeg),
             LongPrice = f(maps:get(mark_price, LongLeg, 0), 0),
             ShortPrice = f(maps:get(mark_price, ShortLeg, 0), 0),
             Mid = (LongPrice + ShortPrice) / 2,
@@ -198,7 +198,7 @@ timing(_, _) -> <<"missing_funding_time">>.
 seconds_until(0) -> 0;
 seconds_until(Ms) -> max(0, (Ms - arbiguard_util:now_ms()) div 1000).
 
-max_position_usdt(Req) ->
+max_position_usdt(Req, LongLeg, ShortLeg) ->
     Capital = f(maps:get(capital_usdt, Req, 10000), 10000),
     Pct = f(maps:get(max_position_pct, Req, 0.1), 0.1),
     Margin = f(maps:get(execution_notional_usdt, Req, 200), 200),
@@ -207,7 +207,16 @@ max_position_usdt(Req) ->
         true -> Capital * Pct;
         false -> Margin
     end,
-    max(0.0, min(Margin, MarginCap) * Leverage).
+    Target = max(0.0, min(Margin, MarginCap) * Leverage),
+    apply_leg_notional_limits(Target, LongLeg, ShortLeg).
+
+apply_leg_notional_limits(Target, LongLeg, ShortLeg) ->
+    Limits = [f(maps:get(max_single_order_usdt, Leg, 0), 0) || Leg <- [LongLeg, ShortLeg],
+                                                            f(maps:get(max_single_order_usdt, Leg, 0), 0) > 0],
+    case Limits of
+        [] -> Target;
+        _ -> min(Target, lists:min(Limits))
+    end.
 
 normalize_window(V) when V =< 0 -> 8;
 normalize_window(V) when V > 24 -> max(1, V / 3600);

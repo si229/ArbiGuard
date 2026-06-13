@@ -104,6 +104,13 @@ route(#{method := <<"POST">>, path := <<"/api/config/exchange/ws">>, body := Bod
                maps:get(ws_port, Payload, 443),
                maps:get(ws_path, Payload, <<"/">>)),
     json_response(200, Result);
+route(#{method := <<"POST">>, path := <<"/api/config/exchange/limits">>, body := Body}) ->
+    Payload = safe_decode(Body),
+    Result = arbiguard_runtime_config:set_exchange_limits(
+               maps:get(exchange, Payload, <<"">>),
+               maps:get(max_single_order_usdt, Payload, 0),
+               maps:get(max_total_position_usdt, Payload, 0)),
+    json_response(200, Result);
 route(#{method := <<"GET">>, path := <<"/api/processes">>}) ->
     json_response(200, arbiguard_processes:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/executor/state">>}) ->
