@@ -46,7 +46,8 @@ handle_call({get_exchange_token, ExchangeID0}, _From, State = #state{tokens = To
     {reply, maps:get(ExchangeID, Tokens, undefined), State};
 handle_call({submit_order, Req, Order0}, _From, State = #state{enabled = Enabled, orders = Orders, logs = Logs}) ->
     Now = arbiguard_util:now_ms(),
-    Order = Order0#{submitted_at => Now, mode => live},
+    AccountID = arbiguard_util:to_binary(maps:get(account_id, Order0, maps:get(account_id, Req, <<"live-main">>))),
+    Order = Order0#{submitted_at => Now, mode => live, account_mode => <<"live">>, account_id => AccountID},
     ID = maps:get(id, Order, order_id(Order)),
     Result =
         case Enabled of
@@ -59,6 +60,7 @@ handle_call({submit_order, Req, Order0}, _From, State = #state{enabled = Enabled
         end,
     Log = #{time => Now,
             action => <<"live_order_request">>,
+            account_id => AccountID,
             id => ID,
             status => maps:get(status, Result),
             reason => maps:get(reason, Result),

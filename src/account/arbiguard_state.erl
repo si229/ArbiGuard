@@ -114,10 +114,10 @@ ensure_exchange_balances(Paper, Exchanges) ->
     end.
 
 refresh_positions(Paper, Ops) ->
-    OpByKey = maps:from_list([{position_key(Op), Op} || Op <- Ops]),
+    OpByKey = maps:from_list([{position_pair_key(Op), Op} || Op <- Ops]),
     Positions0 = maps:get(positions, Paper, #{}),
-    Positions = maps:map(fun(Key, Pos) ->
-        case maps:get(Key, OpByKey, undefined) of
+    Positions = maps:map(fun(_Key, Pos) ->
+        case maps:get(position_pair_key(Pos), OpByKey, undefined) of
             undefined -> Pos;
             Op -> refresh_position(Pos, Op)
         end
@@ -154,7 +154,7 @@ open_best(Paper, Req, Ops0) ->
     end, Paper, Ops).
 
 maybe_open(Paper, Req, Op) ->
-    Key = position_key(Op),
+    Key = position_key(Req, Op),
     Positions = maps:get(positions, Paper, #{}),
     case maps:is_key(Key, Positions) of
         true -> Paper;
@@ -170,10 +170,13 @@ maybe_open(Paper, Req, Op) ->
 
 open_position(Paper, Req, Key, Op, Notional) ->
     Leverage = max(1.0, arbiguard_util:to_float(maps:get(paper_leverage, Req, 10), 10)),
+    Account = account_scope(Req, Op),
     LongEx = maps:get(long_exchange, Op),
     ShortEx = maps:get(short_exchange, Op),
     LongPrice = maps:get(long_price, Op, 0.0),
     ShortPrice = maps:get(short_price, Op, 0.0),
+    LongMarkPrice = maps:get(long_mark_price, Op, maps:get(long_price, Op, 0.0)),
+    ShortMarkPrice = maps:get(short_mark_price, Op, maps:get(short_price, Op, 0.0)),
     LongFeeRate = maps:get(long_fee_rate, Op, 0.0005),
     ShortFeeRate = maps:get(short_fee_rate, Op, 0.0005),
     Margin = Notional / Leverage,
@@ -188,6 +191,8 @@ open_position(Paper, Req, Key, Op, Notional) ->
             LongQty = safe_div(Notional, LongPrice),
             ShortQty = safe_div(Notional, ShortPrice),
             Pos = #{id => Key,
+                    account_mode => maps:get(mode, Account),
+                    account_id => maps:get(id, Account),
                     symbol => maps:get(symbol, Op),
                     long_exchange => LongEx,
                     short_exchange => ShortEx,
@@ -195,6 +200,11 @@ open_position(Paper, Req, Key, Op, Notional) ->
                     short_entry_price => ShortPrice,
                     long_current_price => LongPrice,
                     short_current_price => ShortPrice,
+                    long_mark_price => LongMarkPrice,
+                    short_mark_price => ShortMarkPrice,
+                    long_liquidation_reference_price => LongMarkPrice,
+                    short_liquidation_reference_price => ShortMarkPrice,
+                    liquidation_price_basis => <<"mark_price">>,
                     long_qty => LongQty,
                     short_qty => ShortQty,
                     long_margin => Margin,
@@ -218,6 +228,8 @@ open_position(Paper, Req, Key, Op, Notional) ->
                     last_opportunity_method => maps:get(arbitrage_method, Op, <<"">>)},
             Trade = #{time => Now,
                       action => <<"open">>,
+                      account_mode => maps:get(mode, Account),
+                      account_id => maps:get(id, Account),
                       symbol => maps:get(symbol, Op),
                       long_exchange => LongEx,
                       short_exchange => ShortEx,
@@ -308,11 +320,24 @@ exchange_equity(Paper) ->
 position_margin_total(Positions) ->
     lists:sum([maps:get(long_margin, P, 0) + maps:get(short_margin, P, 0) || {_K, P} <- maps:to_list(Positions)]).
 
-position_key(Op) ->
-    <<(maps:get(symbol, Op))/binary, "|", (maps:get(long_exchange, Op))/binary, "|", (maps:get(short_exchange, Op))/binary>>.
+position_key(Req, Op) ->
+    Account = account_scope(Req, Op),
+    <<(maps:get(id, Account))/binary, "|", (maps:get(mode, Account))/binary, "|",
+      (maps:get(symbol, Op))/binary, "|", (maps:get(long_exchange, Op))/binary, "|",
+      (maps:get(short_exchange, Op))/binary>>.
+
+position_pair_key(Item) ->
+    <<(maps:get(symbol, Item, <<"">>))/binary, "|", (maps:get(long_exchange, Item, <<"">>))/binary, "|",
+      (maps:get(short_exchange, Item, <<"">>))/binary>>.
 
 pair_key(Item) ->
     <<(maps:get(long_exchange, Item, <<"">>))/binary, "->", (maps:get(short_exchange, Item, <<"">>))/binary>>.
+
+account_scope(Req, Op) ->
+    Mode0 = maps:get(account_mode, Req, maps:get(account_mode, Op, <<"paper">>)),
+    Mode = case Mode0 of live -> <<"live">>; paper -> <<"paper">>; _ -> arbiguard_util:to_binary(Mode0) end,
+    DefaultID = case Mode of <<"live">> -> <<"live-main">>; _ -> <<"paper-main">> end,
+    #{mode => Mode, id => arbiguard_util:to_binary(maps:get(account_id, Req, maps:get(account_id, Op, DefaultID)))}.
 
 max_position(Req) ->
     max(maps:get(execution_notional_usdt, Req, 200), maps:get(capital_usdt, Req, 10000) * maps:get(max_position_pct, Req, 0.1)).
