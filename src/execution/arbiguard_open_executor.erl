@@ -71,8 +71,10 @@ code_change(_OldVsn, State, _Extra) ->
 maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
     Req1 = arbiguard_calc:normalize_request(Req),
     MinProfit = maps:get(min_execution_profit_usdt, Req1, 5.0),
+    MaxOpen = maps:get(max_open_positions, Req1, 5),
     ID = order_key(Req1, Op),
-    case maps:get(estimated_net_profit, Op, 0) >= MinProfit andalso not maps:is_key(ID, Orders) of
+    CanOpenMore = can_create_more_orders(MaxOpen, Orders),
+    case CanOpenMore andalso maps:get(estimated_net_profit, Op, 0) >= MinProfit andalso not maps:is_key(ID, Orders) of
         true ->
             subscribe_order_symbols(Op),
             Order = (order_plan(Req1, Op))#{status => <<"waiting_ws_ticker">>,
@@ -82,6 +84,27 @@ maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
         false ->
             State
     end.
+
+can_create_more_orders(MaxOpen, _Orders) when MaxOpen =< 0 ->
+    false;
+can_create_more_orders(MaxOpen, Orders) ->
+    PositionCount = paper_position_count(),
+    PendingOpenCount = active_open_order_count(Orders),
+    PositionCount + PendingOpenCount < MaxOpen.
+
+paper_position_count() ->
+    case catch arbiguard_state:snapshot() of
+        Snapshot when is_map(Snapshot) -> length(maps:get(positions, Snapshot, []));
+        _ -> 0
+    end.
+
+active_open_order_count(Orders) ->
+    length([O || {_ID, O} <- maps:to_list(Orders), active_open_status(maps:get(status, O, <<"">>))]).
+
+active_open_status(<<"waiting_ws_ticker">>) -> true;
+active_open_status(<<"awaiting_live_open_fill">>) -> true;
+active_open_status(<<"partial_live_open_continue">>) -> true;
+active_open_status(_) -> false.
 
 opportunity_id_set(Req, Opportunities) ->
     maps:from_list([{order_key(Req, Op), true} || Op <- Opportunities]).

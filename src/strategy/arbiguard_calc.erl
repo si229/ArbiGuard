@@ -11,6 +11,7 @@ normalize_request(Req0) ->
     Req1#{
         capital_usdt => Capital,
         max_position_pct => f(maps:get(max_position_pct, Req1, 0.1), 0.1),
+        max_open_positions => max(0, arbiguard_util:to_int(maps:get(max_open_positions, Req1, 5), 5)),
         execution_notional_usdt => f(maps:get(execution_notional_usdt, Req1, 200), 200),
         min_funding_rate => f(maps:get(min_funding_rate, Req1, 0.0003), 0.0003),
         min_price_gap_rate => f(maps:get(min_price_gap_rate, Req1, 0.002), 0.002),

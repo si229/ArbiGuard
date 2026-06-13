@@ -38,6 +38,7 @@
         <div><label>本金 USDT</label><input id="capital_usdt" value="10000"></div>
         <div><label>单币保证金上限 USDT</label><input id="execution_notional_usdt" value="200"></div>
         <div><label>杠杆</label><input id="paper_leverage" value="10"></div>
+        <div><label>最大持仓笔数</label><input id="max_open_positions" value="5"></div>
         <div><label>单币最大仓位比例</label><input id="max_position_pct" value="0.1"></div>
         <div><label>最低资金费差</label><input id="min_funding_rate" value="0.0003"></div>
         <div><label>最低价格差</label><input id="min_price_gap_rate" value="0.002"></div>
@@ -76,7 +77,7 @@
     const display=v=>(v===undefined||v===null||v==='undefined'||v==='')?'-':v;
     const esc=v=>String(display(v)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     async function api(path,opt={}){const r=await fetch(path,{headers:{'content-type':'application/json'},...opt});if(!r.ok)throw new Error(await r.text());return await r.json()}
-    function payload(){let p=['capital_usdt','execution_notional_usdt','paper_leverage','max_position_pct','min_funding_rate','min_price_gap_rate','max_basis_rate','min_execution_profit_usdt','limit'].reduce((a,k)=>(a[k]=n($(k).value),a),{});p.account_mode=$('account_mode').value;return p}
+    function payload(){let p=['capital_usdt','execution_notional_usdt','paper_leverage','max_open_positions','max_position_pct','min_funding_rate','min_price_gap_rate','max_basis_rate','min_execution_profit_usdt','limit'].reduce((a,k)=>(a[k]=n($(k).value),a),{});p.account_mode=$('account_mode').value;return p}
     function setStatus(s){$('status').textContent=s}
     function card(k,v,c=''){return `<div class="card"><div class="label">${k}</div><div class="value ${c}">${v}</div></div>`}
     function renderCards(proc,state,live){const ets=proc.ets||{},acc=proc.account||{},ex=proc.executor||{},sw=proc.symbol_watcher||{},watched=(sw.exchanges||[]).reduce((a,x)=>a+n(x.symbols),0);$('cards').innerHTML=[card('模拟权益',money(state.equity??acc.equity),cls(state.equity??acc.equity)),card('模拟余额',money(state.balance??acc.balance)),card('当前持仓',(state.positions||[]).length),card('实盘启用',String(live.enabled)),card('开仓执行单',(ex.orders||[]).length),card('平仓执行单',(ex.close_orders||[]).length),card('监听币种',watched),card('ETS 行情',ets.tickers||0),card('ETS 资金费',ets.funding||0)].join('')}

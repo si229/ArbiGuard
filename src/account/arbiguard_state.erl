@@ -154,7 +154,7 @@ refresh_position(Pos, Op) ->
     }.
 
 open_best(Paper, Req, Ops0) ->
-    MaxOpen = min(5, max(1, maps:get(limit, Req, 30))),
+    MaxOpen = max(0, maps:get(max_open_positions, Req, 5)),
     Ops = lists:sort(fun(A, B) -> maps:get(expected_net_return, A, 0) >= maps:get(expected_net_return, B, 0) end, Ops0),
     lists:foldl(fun(Op, Acc) ->
         case maps:size(maps:get(positions, Acc, #{})) >= MaxOpen of
