@@ -5,24 +5,31 @@
 -define(DELIST_RISK_MS, 12 * 3600 * 1000).
 
 normalize_request(Req0) ->
-    Capital = f(maps:get(capital_usdt, Req0, 10000), 10000),
-    Req0#{
+    Defaults = default_scan(),
+    Req1 = maps:merge(Defaults, Req0),
+    Capital = f(maps:get(capital_usdt, Req1, 10000), 10000),
+    Req1#{
         capital_usdt => Capital,
-        max_position_pct => f(maps:get(max_position_pct, Req0, 0.1), 0.1),
-        execution_notional_usdt => f(maps:get(execution_notional_usdt, Req0, 200), 200),
-        min_funding_rate => f(maps:get(min_funding_rate, Req0, 0.0003), 0.0003),
-        min_price_gap_rate => f(maps:get(min_price_gap_rate, Req0, 0.002), 0.002),
-        max_basis_rate => f(maps:get(max_basis_rate, Req0, 0.02), 0.02),
-        min_quote_volume => f(maps:get(min_quote_volume, Req0, 0), 0),
-        execution_window_sec => f(maps:get(execution_window_sec, Req0, 60), 60),
-        fast_refresh_sec => f(maps:get(fast_refresh_sec, Req0, 1), 1),
-        limit => arbiguard_util:to_int(maps:get(limit, Req0, 30), 30),
-        paper_leverage => f(maps:get(paper_leverage, Req0, 10), 10),
-        min_execution_profit_usdt => f(maps:get(min_execution_profit_usdt, Req0, 5), 5),
-        price_gap_close_profit_usdt => f(maps:get(price_gap_close_profit_usdt, Req0, 10), 10),
-        execution_order_mode => maps:get(execution_order_mode, Req0, <<"fok">>),
-        exchanges => normalize_exchanges(maps:get(exchanges, Req0, default_exchanges()))
+        max_position_pct => f(maps:get(max_position_pct, Req1, 0.1), 0.1),
+        execution_notional_usdt => f(maps:get(execution_notional_usdt, Req1, 200), 200),
+        min_funding_rate => f(maps:get(min_funding_rate, Req1, 0.0003), 0.0003),
+        min_price_gap_rate => f(maps:get(min_price_gap_rate, Req1, 0.002), 0.002),
+        max_basis_rate => f(maps:get(max_basis_rate, Req1, 0.02), 0.02),
+        min_quote_volume => f(maps:get(min_quote_volume, Req1, 0), 0),
+        execution_window_sec => f(maps:get(execution_window_sec, Req1, 60), 60),
+        fast_refresh_sec => f(maps:get(fast_refresh_sec, Req1, 1), 1),
+        limit => arbiguard_util:to_int(maps:get(limit, Req1, 30), 30),
+        paper_leverage => f(maps:get(paper_leverage, Req1, 10), 10),
+        min_execution_profit_usdt => f(maps:get(min_execution_profit_usdt, Req1, 5), 5),
+        price_gap_close_profit_usdt => f(maps:get(price_gap_close_profit_usdt, Req1, 10), 10),
+        execution_order_mode => maps:get(execution_order_mode, Req1, <<"fok">>),
+        exchanges => normalize_exchanges(maps:get(exchanges, Req1, default_exchanges()))
     }.
+
+default_scan() ->
+    Config = application:get_env(arbiguard, default_scan, #{}),
+    Exchanges = application:get_env(arbiguard, exchanges, default_exchanges()),
+    Config#{exchanges => Exchanges}.
 
 default_exchanges() ->
     [#{id => <<"binance">>, name => <<"Binance">>, enabled => true, base_url => <<"https://fapi.binance.com">>, maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
