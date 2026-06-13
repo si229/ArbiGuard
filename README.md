@@ -35,9 +35,27 @@ cd E:\contract\ArbiGuard
 
 ```text
 GET  /api/health
+GET  /api/config
 GET  /api/funding/state
 POST /api/funding/scan
 POST /api/funding/paper/reset
+```
+
+Runtime configuration lives in:
+
+```text
+config/sys.config
+config/vm.args
+```
+
+Important keys:
+
+```erlang
+{http_port, 8771}.
+{paper_capital_usdt, 10000.0}.
+{default_scan, #{...}}.
+{exchanges, [#{id => <<"binance">>, ...}]}.
+{execution, #{max_order_book_age_ms => 1000, ...}}.
 ```
 
 Example scan with local snapshots:

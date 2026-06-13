@@ -94,6 +94,8 @@ parse_headers([Line | Rest], Acc) ->
 
 route(#{method := <<"GET">>, path := <<"/api/health">>}) ->
     json_response(200, #{ok => true, app => <<"ArbiGuard">>});
+route(#{method := <<"GET">>, path := <<"/api/config">>}) ->
+    json_response(200, arbiguard_config:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/funding/state">>}) ->
     json_response(200, arbiguard_state:snapshot());
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
