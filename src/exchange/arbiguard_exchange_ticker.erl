@@ -4,7 +4,8 @@
 -export([start_link/1, start_ws/1, subscribe/3, unsubscribe/3, upsert_ticker/2, snapshot/1, name/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {exchange, id, subscriptions = #{}, ws_enabled = false}).
+-record(state, {exchange, id, subscriptions = #{}, ws_enabled = false,
+                ws_connected = false, ws_status = <<"stopped">>, ws_error = undefined}).
 
 start_link(Exchange) ->
     ID = maps:get(id, Exchange),
@@ -47,8 +48,13 @@ handle_call({unsubscribe, Symbol0, Reason}, _From, State = #state{subscriptions 
     Symbol = norm_symbol(Symbol0),
     lager:log(info, self(), "ticker unsubscribe exchange=~s symbol=~s reason=~p", [State#state.id, Symbol, Reason]),
     {reply, ok, State#state{subscriptions = maps:remove(Symbol, Subs)}};
-handle_call(snapshot, _From, State = #state{subscriptions = Subs, ws_enabled = WSEnabled}) ->
-    {reply, #{exchange => State#state.id, ws_enabled => WSEnabled, subscriptions => maps:keys(Subs)}, State};
+handle_call(snapshot, _From, State = #state{subscriptions = Subs}) ->
+    {reply, #{exchange => State#state.id,
+              ws_enabled => State#state.ws_enabled,
+              ws_connected => State#state.ws_connected,
+              ws_status => State#state.ws_status,
+              ws_error => State#state.ws_error,
+              subscriptions => maps:keys(Subs)}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -75,11 +81,14 @@ code_change(_OldVsn, State, _Extra) ->
 do_start_ws(State = #state{ws_enabled = true}) ->
     State;
 do_start_ws(State) ->
-    %% Placeholder for exchange-specific WS connection.
-    %% This process owns subscription state; concrete WS adapters will reconnect
-    %% and replay State#state.subscriptions after reconnect.
-    lager:log(info, self(), "ticker ws start exchange=~s", [State#state.id]),
-    State#state{ws_enabled = true}.
+    %% There is no concrete websocket adapter wired yet. Keep subscription
+    %% ownership here, but do not report a fake connection.
+    Error = <<"websocket_adapter_not_implemented">>,
+    lager:log(warning, self(), "ticker ws not connected exchange=~s reason=~s", [State#state.id, Error]),
+    State#state{ws_enabled = true,
+                ws_connected = false,
+                ws_status = <<"adapter_missing">>,
+                ws_error = Error}.
 
 norm_symbol(V) ->
     string:uppercase(arbiguard_util:to_binary(V)).

@@ -1,6 +1,6 @@
 # ArbiGuard
 
-ArbiGuard is an Erlang/rebar3 project for cross-exchange perpetual arbitrage.
+ArbiGuard is an Erlang/rebar3 project for cross-exchange perpetual futures arbitrage.
 
 This project is intentionally separated from the AI/model-training code. It keeps only the arbitrage path:
 
@@ -8,60 +8,59 @@ This project is intentionally separated from the AI/model-training code. It keep
 - opportunity scoring
 - paper account simulation
 - position uniqueness by `symbol + long_exchange + short_exchange`
-- HTTP management API
-- Windows-compatible OTP dependencies only
+- HTTP management UI and API
+- Windows-compatible OTP dependencies
 
-## OTP Process Layout
-
-```text
-arbiguard_sup
-  ├─ core/
-  │  ├─ arbiguard_app
-  │  ├─ arbiguard_sup
-  │  ├─ arbiguard_ets
-  │  ├─ arbiguard_config
-  │  └─ arbiguard_processes
-  ├─ account/
-  │  └─ arbiguard_state
-  ├─ execution/
-  │  └─ arbiguard_executor
-  ├─ exchange/
-  │  ├─ arbiguard_market
-  │  ├─ arbiguard_exchange_ticker
-  │  └─ arbiguard_exchange_funding
-  ├─ strategy/
-  │  ├─ arbiguard_calc
-  │  └─ arbiguard_scanner
-  ├─ http/
-  │  └─ arbiguard_http
-  └─ support/
-     ├─ arbiguard_json
-     └─ arbiguard_util
-```
-
-Runtime process tree:
+## Runtime Process Tree
 
 ```text
 arbiguard_sup
-  ├─ arbiguard_ets
-  │    ├─ arbiguard_ticker_ets
-  │    ├─ arbiguard_funding_ets
-  │    └─ arbiguard_opportunity_ets
-  ├─ arbiguard_state
-  │    └─ paper/live account, positions, exchange balances, token configs
-  ├─ arbiguard_executor
-  │    └─ execution orders, target notional/qty, ticker subscriptions
-  ├─ arbiguard_exchange_ticker per exchange
-  │    └─ start_ws / subscribe / unsubscribe / ticker updates
-  ├─ arbiguard_exchange_funding per exchange
-  │    └─ periodic funding REST refresh into ETS
-  ├─ arbiguard_scanner
-  │    └─ reads ETS ticker/funding data and detects opportunities
-  └─ arbiguard_http
-       └─ management API
+  core/
+    arbiguard_app
+    arbiguard_sup
+    arbiguard_ets
+    arbiguard_config
+    arbiguard_processes
+  account/
+    arbiguard_state
+  execution/
+    arbiguard_executor
+  exchange/
+    arbiguard_market
+    arbiguard_exchange_ticker
+    arbiguard_exchange_funding
+  strategy/
+    arbiguard_calc
+    arbiguard_scanner
+  http/
+    arbiguard_http
+  support/
+    arbiguard_json
+    arbiguard_util
 ```
 
-Current flow:
+Actual supervised workers:
+
+```text
+arbiguard_sup
+  arbiguard_state
+  arbiguard_executor
+  arbiguard_exchange_ticker per exchange
+  arbiguard_exchange_funding per exchange
+  arbiguard_scanner
+  arbiguard_http
+```
+
+`arbiguard_ets` is not a process. It is a plain helper module. `arbiguard_sup`
+creates these named ETS tables directly during supervisor initialization:
+
+```text
+arbiguard_ticker_ets
+arbiguard_funding_ets
+arbiguard_opportunity_ets
+```
+
+## Flow
 
 ```text
 exchange_funding -> ETS funding/ticker baseline
@@ -69,6 +68,7 @@ exchange_ticker  -> ETS live ticker
 scanner          -> reads ETS and finds opportunities
 executor         -> creates execution order and subscribes ticker legs
 state            -> maintains simulated account and positions
+http             -> management UI and JSON APIs
 ```
 
 ## Run
@@ -78,7 +78,7 @@ cd E:\contract\ArbiGuard
 rebar3 shell
 ```
 
-Default HTTP port:
+Default management UI:
 
 ```text
 http://127.0.0.1:8771
@@ -94,6 +94,7 @@ cd E:\contract\ArbiGuard
 ## APIs
 
 ```text
+GET  /
 GET  /api/health
 GET  /api/config
 GET  /api/processes
@@ -103,7 +104,7 @@ POST /api/funding/scan
 POST /api/funding/paper/reset
 ```
 
-Runtime configuration lives in:
+Runtime configuration:
 
 ```text
 config/sys.config
@@ -117,7 +118,7 @@ log/arbiguard.log
 log/error.log
 ```
 
-Important keys:
+Important config keys:
 
 ```erlang
 {http_port, 8771}.
@@ -127,13 +128,6 @@ Important keys:
 {execution, #{max_order_book_age_ms => 1000, ...}}.
 ```
 
-Example scan with local snapshots:
+## Documentation
 
-```powershell
-$body = Get-Content .\examples\scan_payload.json -Raw
-Invoke-RestMethod http://127.0.0.1:8771/api/funding/scan -Method POST -ContentType application/json -Body $body
-```
-
-## Notes
-
-The first Erlang version focuses on extracting the arbitrage domain into a clean OTP application. Exchange adapters are isolated in `arbiguard_market`, so more REST/WS details can be filled in without touching the scanner or paper account.
+- [Architecture and API](docs/architecture.md)

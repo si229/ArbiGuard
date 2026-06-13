@@ -5,7 +5,7 @@
          set_exchange_token/2, get_exchange_token/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {paper, tokens = #{}}).
+-record(state, {paper}).
 
 start_link(Capital) ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [Capital], []).
@@ -31,9 +31,9 @@ get_exchange_token(ExchangeID) ->
 init([Capital]) ->
     {ok, #state{paper = new_paper(Capital)}}.
 
-handle_call(snapshot, _From, State = #state{paper = Paper, tokens = Tokens}) ->
+handle_call(snapshot, _From, State = #state{paper = Paper}) ->
     Snapshot = paper_snapshot(Paper),
-    {reply, Snapshot#{token_exchanges => maps:keys(Tokens)}, State};
+    {reply, Snapshot, State};
 handle_call({reset_paper, Payload}, _From, State) ->
     Capital = arbiguard_util:to_float(maps:get(capital_usdt, Payload, 10000), 10000),
     Paper = new_paper(Capital),
@@ -49,12 +49,10 @@ handle_call({apply_open_order, Req0, Order, Opportunity}, _From, State = #state{
     Paper2 = open_position(Paper1, Req, Key, Opportunity, Notional),
     Paper = refresh_equity(Paper2#{updated_at => iso_now()}),
     {reply, paper_snapshot(Paper), State#state{paper = Paper}};
-handle_call({set_exchange_token, ExchangeID0, TokenConfig}, _From, State = #state{tokens = Tokens}) ->
-    ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
-    {reply, ok, State#state{tokens = Tokens#{ExchangeID => TokenConfig}}};
-handle_call({get_exchange_token, ExchangeID0}, _From, State = #state{tokens = Tokens}) ->
-    ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
-    {reply, maps:get(ExchangeID, Tokens, undefined), State};
+handle_call({set_exchange_token, ExchangeID, TokenConfig}, _From, State) ->
+    {reply, arbiguard_live_account:set_exchange_token(ExchangeID, TokenConfig), State};
+handle_call({get_exchange_token, ExchangeID}, _From, State) ->
+    {reply, arbiguard_live_account:get_exchange_token(ExchangeID), State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 

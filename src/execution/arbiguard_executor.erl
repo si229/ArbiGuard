@@ -54,10 +54,8 @@ maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
         true ->
             Order = order_plan(Req, Op),
             subscribe_order_symbols(Op),
-            %% Paper mode: mark the planned order as filled immediately.
-            %% Live mode will replace this call with exchange order state callbacks.
-            _ = catch arbiguard_state:apply_open_order(Req, Order, Op),
-            State#state{orders = Orders#{ID => Order#{status => <<"filled">>, filled_at => arbiguard_util:now_ms()}}};
+            FilledOrder = dispatch_order(Req, Order, Op),
+            State#state{orders = Orders#{ID => FilledOrder}};
         false ->
             State
     end.
@@ -91,6 +89,20 @@ subscribe_order_symbols(Op) ->
     catch arbiguard_exchange_ticker:subscribe(LongEx, Symbol, execution_order),
     catch arbiguard_exchange_ticker:subscribe(ShortEx, Symbol, execution_order),
     ok.
+
+dispatch_order(Req0, Order, Op) ->
+    Req = arbiguard_calc:normalize_request(Req0),
+    case maps:get(account_mode, Req, <<"paper">>) of
+        <<"live">> ->
+            _ = catch arbiguard_live_account:submit_order(Req, Order),
+            Order#{status => <<"submitted_live">>, submitted_at => arbiguard_util:now_ms()};
+        live ->
+            _ = catch arbiguard_live_account:submit_order(Req, Order),
+            Order#{status => <<"submitted_live">>, submitted_at => arbiguard_util:now_ms()};
+        _ ->
+            _ = catch arbiguard_state:apply_open_order(Req, Order, Op),
+            Order#{status => <<"filled">>, filled_at => arbiguard_util:now_ms()}
+    end.
 
 order_key(Op) ->
     <<(maps:get(symbol, Op))/binary, "|", (maps:get(long_exchange, Op))/binary, "|", (maps:get(short_exchange, Op))/binary>>.

@@ -8,6 +8,7 @@ snapshot() ->
       scanner => safe_call(fun arbiguard_scanner:snapshot/0),
       executor => safe_call(fun arbiguard_executor:snapshot/0),
       account => account_brief(),
+      live_account => safe_call(fun arbiguard_live_account:snapshot/0),
       exchanges => [exchange_snapshot(E) || E <- Exchanges]}.
 
 ets_info() ->

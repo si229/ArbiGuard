@@ -1,24 +1,19 @@
 -module(arbiguard_ets).
--behaviour(gen_server).
 
--export([start_link/0]).
+-export([init/0]).
 -export([put_ticker/1, get_ticker/2, all_tickers/0,
          put_funding/1, get_funding/2, all_funding/0,
          put_opportunities/1, all_opportunities/0]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TICKER, arbiguard_ticker_ets).
 -define(FUNDING, arbiguard_funding_ets).
 -define(OPPORTUNITY, arbiguard_opportunity_ets).
 
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
-init([]) ->
+init() ->
     new_table(?TICKER),
     new_table(?FUNDING),
     new_table(?OPPORTUNITY),
-    {ok, #{}}.
+    ok.
 
 put_ticker(Row) ->
     Key = key(Row),
@@ -49,21 +44,6 @@ put_opportunities(Ops) ->
 
 all_opportunities() ->
     [Row || {_Key, Row} <- ets:tab2list(?OPPORTUNITY)].
-
-handle_call(_Req, _From, State) ->
-    {reply, ok, State}.
-
-handle_cast(_Msg, State) ->
-    {noreply, State}.
-
-handle_info(_Info, State) ->
-    {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 new_table(Name) ->
     case ets:info(Name) of
