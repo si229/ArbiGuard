@@ -220,6 +220,15 @@ unsubscribe_payload(<<"okx">>, Symbol) ->
 unsubscribe_payload(<<"gate">>, Symbol) ->
     arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.tickers">>,
                             event => <<"unsubscribe">>, payload => [gate_symbol(Symbol)]});
+unsubscribe_payload(<<"htx">>, Symbol) ->
+    Contract = htx_symbol(Symbol),
+    arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".ticker">>, id => Symbol});
+unsubscribe_payload(<<"weex">>, Symbol) ->
+    arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
+unsubscribe_payload(<<"binance">>, _Symbol) ->
+    %% Binance uses the all-market !bookTicker stream in this process, so a
+    %% per-symbol unsubscribe is not available for the current connection.
+    undefined;
 unsubscribe_payload(_, _Symbol) ->
     undefined.
 
