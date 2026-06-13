@@ -1,4 +1,4 @@
-﻿-module(arbiguard_http).
+-module(arbiguard_http).
 -behaviour(gen_server).
 
 -export([start_link/1]).
@@ -159,7 +159,6 @@ priv_index_html() ->
             end
     end.
 
-index_html() ->
 admin_html() ->
     unicode:characters_to_binary([
         "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
