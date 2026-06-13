@@ -40,17 +40,14 @@ handle_info({ticker_update, Row}, State = #state{ticker_cache = Cache}) ->
     State1 = State#state{ticker_cache = update_symbol_cache(Row, Cache)},
     {noreply, maybe_dispatch_symbol_orders(Symbol, State1)};
 handle_info({live_order_update, OrderUpdate}, State = #state{orders = Orders}) ->
-    ID = maps:get(id, OrderUpdate, <<"">>),
+    ID = maps:get(parent_id, OrderUpdate, maps:get(id, OrderUpdate, <<"">>)),
     Status = maps:get(status, OrderUpdate, <<"">>),
-    FinalOrder = merge_order(maps:get(ID, Orders, #{}), OrderUpdate),
+    Parent0 = maps:get(ID, Orders, #{}),
+    Parent = apply_live_child_update(Parent0, OrderUpdate),
     case Status of
-        <<"filled">> ->
-            unsubscribe_position_symbols(FinalOrder),
-            {noreply, State#state{orders = Orders#{ID => FinalOrder#{status => <<"filled_live_close">>}}}};
-        <<"partial_filled">> ->
-            {noreply, State#state{orders = Orders#{ID => FinalOrder#{status => <<"partial_live_close_continue">>}}}};
-        _ ->
-            {noreply, State#state{orders = Orders#{ID => FinalOrder}}}
+        <<"filled">> -> maybe_finish_or_continue(Parent, State);
+        <<"partial_filled">> -> maybe_finish_or_continue(Parent, State);
+        _ -> {noreply, State#state{orders = Orders#{ID => Parent}}}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -107,15 +104,9 @@ dispatch_close(Req0, Order) ->
     AccountMode = maps:get(account_mode, Order, maps:get(account_mode, Req, <<"paper">>)),
     FinalOrder = case AccountMode of
         <<"live">> ->
-            LiveResult = catch arbiguard_live_account:submit_order(Req, Order#{owner_pid => self()}),
-            (public_order(Order))#{status => live_status(LiveResult, <<"awaiting_live_close_fill">>),
-                                   account_submit_result => LiveResult,
-                                   submitted_at => arbiguard_util:now_ms()};
+            submit_live_child_order(Req, Order, <<"awaiting_live_close_fill">>);
         live ->
-            LiveResult = catch arbiguard_live_account:submit_order(Req, Order#{owner_pid => self()}),
-            (public_order(Order))#{status => live_status(LiveResult, <<"awaiting_live_close_fill">>),
-                                   account_submit_result => LiveResult,
-                                   submitted_at => arbiguard_util:now_ms()};
+            submit_live_child_order(Req, Order, <<"awaiting_live_close_fill">>);
         _ ->
             (public_order(Order))#{status => <<"queued_paper_close">>,
                                    exchange_submit => <<"skipped_paper_account">>,
@@ -132,6 +123,43 @@ maybe_unsubscribe_after_dispatch(Order) ->
         <<"submitted_live_rejected">> -> unsubscribe_position_symbols(Order);
         _ -> unsubscribe_position_symbols(Order)
     end.
+
+submit_live_child_order(Req, Order, AwaitingStatus) ->
+    ParentID = maps:get(id, Order),
+    Remaining = remaining_to_submit(Order),
+    ChildID = child_order_id(ParentID),
+    ChildOrder = Order#{id => ChildID,
+                        parent_id => ParentID,
+                        execution_order_id => ParentID,
+                        owner_pid => self(),
+                        target_notional => Remaining,
+                        requested_notional => Remaining},
+    LiveResult = catch arbiguard_live_account:submit_order(Req, ChildOrder),
+    case live_submit_accepted(LiveResult) of
+        true ->
+            Pending0 = maps:get(pending_submissions, Order, #{}),
+            Pending = Pending0#{ChildID => LiveResult},
+            public_order(Order#{status => AwaitingStatus,
+                                pending_submissions => Pending,
+                                pending_notional => pending_notional(Pending),
+                                last_submit_result => LiveResult,
+                                submitted_at => arbiguard_util:now_ms()});
+        false ->
+            public_order(Order#{status => <<"waiting_ws_ticker">>,
+                                last_submit_result => LiveResult,
+                                last_submit_error => submit_error(LiveResult),
+                                submitted_at => arbiguard_util:now_ms()})
+    end.
+
+live_submit_accepted(Result) when is_map(Result) ->
+    maps:get(status, Result, <<"">>) =:= <<"awaiting_fill">>;
+live_submit_accepted(_Result) ->
+    false.
+
+submit_error(Result) when is_map(Result) ->
+    maps:get(reason, Result, <<"submit_failed">>);
+submit_error(_Result) ->
+    <<"submit_exception">>.
 
 live_status(LiveResult, Awaiting) when is_map(LiveResult) ->
     case maps:get(status, LiveResult, <<"">>) of
@@ -161,6 +189,8 @@ maybe_dispatch_order(Order, Cache) ->
     case maps:get(status, Order, <<"">>) of
         <<"waiting_ws_ticker">> ->
             maybe_submit_close_from_ticker(Order, Cache);
+        <<"awaiting_live_close_fill">> ->
+            maybe_submit_close_from_ticker(Order, Cache);
         <<"partial_live_close_continue">> ->
             maybe_submit_close_from_ticker(Order, Cache);
         _ ->
@@ -168,6 +198,12 @@ maybe_dispatch_order(Order, Cache) ->
     end.
 
 maybe_submit_close_from_ticker(Order, Cache) ->
+    case remaining_to_submit(Order) > 0 of
+        false -> Order;
+        true -> maybe_submit_close_from_ticker_1(Order, Cache)
+    end.
+
+maybe_submit_close_from_ticker_1(Order, Cache) ->
     Position0 = apply_remaining_notional(maps:get(position, Order, #{}), Order),
     case enrich_close_from_cache(Position0, Cache) of
         {ok, Position} ->
@@ -183,14 +219,14 @@ maybe_submit_close_from_ticker(Order, Cache) ->
     end.
 
 apply_remaining_order(Order) ->
-    Remaining = maps:get(remaining_notional, Order, maps:get(target_notional, Order, 0.0)),
+    Remaining = remaining_to_submit(Order),
     case Remaining > 0 of
         true -> Order#{target_notional => Remaining};
         false -> Order
     end.
 
 apply_remaining_notional(Position, Order) ->
-    Remaining = maps:get(remaining_notional, Order, maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0))),
+    Remaining = remaining_to_submit(Order),
     case Remaining > 0 of
         true -> Position#{notional => Remaining, notional_usdt => Remaining};
         false -> Position
@@ -244,6 +280,51 @@ public_order(Order) ->
 
 merge_order(Old, Update) ->
     maps:merge(Old, Update).
+
+apply_live_child_update(Parent, Update) ->
+    ChildID = maps:get(id, Update, <<"">>),
+    Pending0 = maps:get(pending_submissions, Parent, #{}),
+    Pending = maps:remove(ChildID, Pending0),
+    Filled = maps:get(filled_notional, Update, 0.0),
+    Confirmed = maps:get(confirmed_notional, Parent, 0.0) + Filled,
+    Reports = [Update | maps:get(fill_reports, Parent, [])],
+    Parent#{pending_submissions => Pending,
+            pending_notional => pending_notional(Pending),
+            confirmed_notional => Confirmed,
+            remaining_notional => max(0.0, maps:get(target_notional, Parent, 0.0) - Confirmed - pending_notional(Pending)),
+            fill_reports => Reports,
+            last_live_update => Update}.
+
+maybe_finish_or_continue(Parent, State = #state{orders = Orders}) ->
+    ID = maps:get(id, Parent, <<"">>),
+    Target = maps:get(target_notional, Parent, 0.0),
+    Confirmed = maps:get(confirmed_notional, Parent, 0.0),
+    Pending = maps:get(pending_notional, Parent, 0.0),
+    case Target > 0 andalso Confirmed >= Target * 0.999 of
+        true ->
+            Final = Parent#{status => <<"filled_live_close">>, remaining_notional => 0.0},
+            unsubscribe_position_symbols(Final),
+            {noreply, State#state{orders = Orders#{ID => Final}}};
+        false ->
+            Status = case Pending > 0 of
+                true -> <<"awaiting_live_close_fill">>;
+                false -> <<"waiting_ws_ticker">>
+            end,
+            {noreply, State#state{orders = Orders#{ID => Parent#{status => Status}}}}
+    end.
+
+remaining_to_submit(Order) ->
+    Target = maps:get(target_notional, Order, 0.0),
+    Confirmed = maps:get(confirmed_notional, Order, 0.0),
+    Pending = pending_notional(maps:get(pending_submissions, Order, #{})),
+    max(0.0, Target - Confirmed - Pending).
+
+pending_notional(Pending) ->
+    lists:sum([maps:get(remaining_notional, O, maps:get(requested_notional, O, maps:get(target_notional, O, 0.0)))
+               || {_ID, O} <- maps:to_list(Pending)]).
+
+child_order_id(ParentID) ->
+    <<ParentID/binary, "|submit|", (integer_to_binary(arbiguard_util:now_ms()))/binary>>.
 
 account_scope(Req, Position) ->
     Mode0 = maps:get(account_mode, Req, maps:get(account_mode, Position, <<"paper">>)),
