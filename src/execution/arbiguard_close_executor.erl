@@ -1,7 +1,7 @@
 -module(arbiguard_close_executor).
 -behaviour(gen_server).
 
--export([start_link/0, track_position/2, snapshot/0]).
+-export([start_link/0, track_position/2, reset/0, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {orders = #{}, last_submit = 0, ticker_cache = #{}}).
@@ -11,6 +11,9 @@ start_link() ->
 
 track_position(Req, Position) ->
     gen_server:call(?MODULE, {track_position, Req, Position}).
+
+reset() ->
+    gen_server:call(?MODULE, reset).
 
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
@@ -28,6 +31,10 @@ handle_call({track_position, Req, Position}, _From, State = #state{orders = Orde
                 maps:get(account_id, Order, <<"">>)]),
     {reply, public_order(NewOrder), State#state{orders = Orders#{maps:get(id, NewOrder) => NewOrder},
                                                 last_submit = arbiguard_util:now_ms()}};
+handle_call(reset, _From, State = #state{orders = Orders}) ->
+    _ = [unsubscribe_position_symbols(Order) || {_ID, Order} <- maps:to_list(Orders)],
+    {reply, #{ok => true, cleared_close_orders => maps:size(Orders)},
+     State#state{orders = #{}, last_submit = 0, ticker_cache = #{}}};
 handle_call(snapshot, _From, State) ->
     {reply, #{orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_submit => State#state.last_submit,

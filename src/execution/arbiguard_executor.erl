@@ -1,12 +1,17 @@
 -module(arbiguard_executor).
 
--export([notify_opportunities/2, submit_order/2, snapshot/0]).
+-export([notify_opportunities/2, submit_order/2, reset/0, snapshot/0]).
 
 notify_opportunities(Req, Result) ->
     arbiguard_open_executor:notify_opportunities(Req, Result).
 
 submit_order(Req, Opportunity) ->
     arbiguard_open_executor:submit_order(Req, Opportunity).
+
+reset() ->
+    Open = safe(fun arbiguard_open_executor:reset/0),
+    Close = safe(fun arbiguard_close_executor:reset/0),
+    #{ok => true, open_executor => Open, close_executor => Close}.
 
 snapshot() ->
     Open = safe(fun arbiguard_open_executor:snapshot/0),

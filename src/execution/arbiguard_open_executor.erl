@@ -1,7 +1,7 @@
 -module(arbiguard_open_executor).
 -behaviour(gen_server).
 
--export([start_link/0, notify_opportunities/2, submit_order/2, snapshot/0]).
+-export([start_link/0, notify_opportunities/2, submit_order/2, reset/0, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {orders = #{}, last_opportunities = [], last_notify = 0, ticker_cache = #{}}).
@@ -15,6 +15,9 @@ notify_opportunities(Req, Result) ->
 submit_order(Req, Opportunity) ->
     gen_server:call(?MODULE, {submit_order, Req, Opportunity}).
 
+reset() ->
+    gen_server:call(?MODULE, reset).
+
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
 
@@ -24,6 +27,10 @@ init([]) ->
 handle_call({submit_order, Req, Opportunity}, _From, State) ->
     {Order, NewState} = create_order(Req, Opportunity, State),
     {reply, Order, NewState};
+handle_call(reset, _From, State = #state{orders = Orders}) ->
+    _ = [unsubscribe_order_symbols(Order) || {_ID, Order} <- maps:to_list(Orders)],
+    {reply, #{ok => true, cleared_open_orders => maps:size(Orders)},
+     State#state{orders = #{}, last_opportunities = [], ticker_cache = #{}}};
 handle_call(snapshot, _From, State) ->
     {reply, #{orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_opportunities => State#state.last_opportunities,
