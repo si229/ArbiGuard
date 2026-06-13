@@ -1,7 +1,7 @@
 -module(arbiguard_state).
 -behaviour(gen_server).
 
--export([start_link/1, snapshot/0, reset_paper/1, submit_scan/2, apply_open_order/3,
+-export([start_link/1, snapshot/0, reset_paper/1, submit_scan/2, apply_open_order/3, apply_close_order/3,
          set_exchange_token/2, get_exchange_token/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -21,6 +21,9 @@ submit_scan(Req, Result) ->
 
 apply_open_order(Req, Order, Opportunity) ->
     gen_server:call(?MODULE, {apply_open_order, Req, Order, Opportunity}).
+
+apply_close_order(Req, Order, Position) ->
+    gen_server:call(?MODULE, {apply_close_order, Req, Order, Position}).
 
 set_exchange_token(ExchangeID, TokenConfig) ->
     gen_server:call(?MODULE, {set_exchange_token, ExchangeID, TokenConfig}).
@@ -50,6 +53,12 @@ handle_call({apply_open_order, Req0, Order, Opportunity}, _From, State = #state{
     Paper = refresh_equity(Paper2#{updated_at => iso_now()}),
     Snapshot = paper_snapshot(Paper),
     {reply, Snapshot#{opened_position => position_by_id(Key, Snapshot)}, State#state{paper = Paper}};
+handle_call({apply_close_order, _Req0, Order, Position0}, _From, State = #state{paper = Paper0}) ->
+    Position = normalize_close_position(Position0),
+    Key = maps:get(id, Position, maps:get(position_id, Order, maps:get(id, Order, <<"">>))),
+    Paper1 = close_position(Paper0, Key, Position, maps:get(close_rule, Order, maps:get(close_rule, Position, <<"strategy_close">>))),
+    Paper = refresh_equity(Paper1#{updated_at => iso_now()}),
+    {reply, paper_snapshot(Paper), State#state{paper = Paper}};
 handle_call({set_exchange_token, ExchangeID, TokenConfig}, _From, State) ->
     {reply, arbiguard_live_account:set_exchange_token(ExchangeID, TokenConfig), State};
 handle_call({get_exchange_token, ExchangeID}, _From, State) ->
@@ -258,6 +267,63 @@ open_position(Paper, Req, Key, Op, Notional) ->
                    total_open_fee => maps:get(total_open_fee, Paper, 0) + OpenFee,
                    execution_attempts => maps:get(execution_attempts, Paper, 0) + 1}
     end.
+
+close_position(Paper, Key, Position, Reason) ->
+    Positions0 = maps:get(positions, Paper, #{}),
+    Stored = maps:get(Key, Positions0, Position),
+    Pos = maps:merge(Stored, Position),
+    Notional = maps:get(notional, Pos, maps:get(notional_usdt, Pos, 0)),
+    LongEx = maps:get(long_exchange, Pos, <<"">>),
+    ShortEx = maps:get(short_exchange, Pos, <<"">>),
+    LongClose = positive(maps:get(long_close_price, Pos, 0), maps:get(long_current_price, Pos, maps:get(long_entry_price, Pos, 0))),
+    ShortClose = positive(maps:get(short_close_price, Pos, 0), maps:get(short_current_price, Pos, maps:get(short_entry_price, Pos, 0))),
+    LongQty = maps:get(long_qty, Pos, safe_div(Notional, maps:get(long_entry_price, Pos, 0))),
+    ShortQty = maps:get(short_qty, Pos, safe_div(Notional, maps:get(short_entry_price, Pos, 0))),
+    PricePNL = (LongClose - maps:get(long_entry_price, Pos, 0)) * LongQty +
+               (maps:get(short_entry_price, Pos, 0) - ShortClose) * ShortQty,
+    FundingPNL = maps:get(funding_pnl, Pos, 0),
+    CloseFee = maps:get(close_fee, Pos, Notional * (maps:get(long_fee_rate, Pos, 0.0005) + maps:get(short_fee_rate, Pos, 0.0005))),
+    NetPNL = PricePNL + FundingPNL - CloseFee,
+    LongMargin = maps:get(long_margin, Pos, Notional / max(1.0, maps:get(leverage, Pos, 10.0))),
+    ShortMargin = maps:get(short_margin, Pos, Notional / max(1.0, maps:get(leverage, Pos, 10.0))),
+    Bal0 = maps:get(exchange_balances, Paper, #{}),
+    Bal = Bal0#{LongEx => maps:get(LongEx, Bal0, 0) + LongMargin + PricePNL / 2 + FundingPNL / 2 - CloseFee / 2,
+                ShortEx => maps:get(ShortEx, Bal0, 0) + ShortMargin + PricePNL / 2 + FundingPNL / 2 - CloseFee / 2},
+    Trade = #{time => arbiguard_util:now_ms(),
+              action => <<"close">>,
+              account_mode => maps:get(account_mode, Pos, <<"paper">>),
+              account_id => maps:get(account_id, Pos, <<"paper-main">>),
+              symbol => maps:get(symbol, Pos, <<"">>),
+              long_exchange => LongEx,
+              short_exchange => ShortEx,
+              long_price => LongClose,
+              short_price => ShortClose,
+              long_entry_price => maps:get(long_entry_price, Pos, 0),
+              short_entry_price => maps:get(short_entry_price, Pos, 0),
+              long_qty => LongQty,
+              short_qty => ShortQty,
+              notional => Notional,
+              open_fee => maps:get(open_fee, Pos, 0),
+              close_fee => CloseFee,
+              fee => CloseFee,
+              funding_pnl => FundingPNL,
+              price_pnl => PricePNL,
+              net_pnl => NetPNL,
+              expected_net_profit => maps:get(expected_net_profit, Pos, 0),
+              reason => Reason},
+    Logs = [Trade | maps:get(logs, Paper, [])],
+    Paper#{exchange_balances => Bal,
+           positions => maps:remove(Key, Positions0),
+           logs => lists:sublist(Logs, 1000),
+           trade_count => maps:get(trade_count, Paper, 0) + 1,
+           total_close_fee => maps:get(total_close_fee, Paper, 0) + CloseFee,
+           total_funding_pnl => maps:get(total_funding_pnl, Paper, 0) + FundingPNL,
+           total_price_pnl => maps:get(total_price_pnl, Paper, 0) + PricePNL,
+           realized_pnl => maps:get(realized_pnl, Paper, 0) + NetPNL}.
+
+normalize_close_position(Position) ->
+    Position#{long_current_price => positive(maps:get(long_close_price, Position, 0), maps:get(long_current_price, Position, 0)),
+              short_current_price => positive(maps:get(short_close_price, Position, 0), maps:get(short_current_price, Position, 0))}.
 
 add_reject(Paper, Op, Reason) ->
     Now = arbiguard_util:now_ms(),

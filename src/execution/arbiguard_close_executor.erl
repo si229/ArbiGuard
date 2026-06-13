@@ -1,16 +1,13 @@
 -module(arbiguard_close_executor).
 -behaviour(gen_server).
 
--export([start_link/0, submit_close/2, track_position/2, snapshot/0]).
+-export([start_link/0, track_position/2, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {orders = #{}, last_submit = 0, ticker_cache = #{}}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
-submit_close(Req, Position) ->
-    gen_server:call(?MODULE, {submit_close, Req, Position}).
 
 track_position(Req, Position) ->
     gen_server:call(?MODULE, {track_position, Req, Position}).
@@ -21,13 +18,6 @@ snapshot() ->
 init([]) ->
     {ok, #state{}}.
 
-handle_call({submit_close, Req, Position}, _From, State = #state{orders = Orders}) ->
-    Order = close_plan(Req, Position),
-    subscribe_position_symbols(Position),
-    NewOrder = Order#{status => <<"waiting_ws_ticker">>, req => Req, position => Position},
-    State1 = maybe_dispatch_ready_orders(State#state{orders = Orders#{maps:get(id, NewOrder) => NewOrder},
-                                                     last_submit = arbiguard_util:now_ms()}),
-    {reply, public_order(maps:get(maps:get(id, NewOrder), State1#state.orders, NewOrder)), State1};
 handle_call({track_position, Req, Position}, _From, State = #state{orders = Orders}) ->
     Order = tracking_plan(Req, Position),
     subscribe_position_symbols(Position),
@@ -139,10 +129,11 @@ dispatch_close(Req0, Order) ->
         live ->
             submit_live_child_order(Req, Order, <<"awaiting_live_close_fill">>);
         _ ->
-            (public_order(Order))#{status => <<"queued_paper_close">>,
+            _ = catch arbiguard_state:apply_close_order(Req, Order, maps:get(position, Order, #{})),
+            (public_order(Order))#{status => <<"filled_paper_close">>,
                                    exchange_submit => <<"skipped_paper_account">>,
                                    execution_path => <<"ws_ticker_paper_close_no_exchange_submit">>,
-                                   queued_at => arbiguard_util:now_ms()}
+                                   filled_at => arbiguard_util:now_ms()}
     end,
     maybe_unsubscribe_after_dispatch(FinalOrder),
     FinalOrder.
@@ -192,10 +183,6 @@ submit_error(Result) when is_map(Result) ->
 submit_error(_Result) ->
     <<"submit_exception">>.
 
-maybe_dispatch_ready_orders(State = #state{orders = Orders, ticker_cache = Cache}) ->
-    NewOrders = maps:map(fun(_ID, Order) -> maybe_dispatch_order(Order, Cache) end, Orders),
-    State#state{orders = NewOrders}.
-
 maybe_dispatch_symbol_orders(Symbol, State = #state{orders = Orders, ticker_cache = Cache}) ->
     NewOrders = maps:map(fun(_ID, Order) ->
         case maps:get(symbol, Order, <<"">>) =:= Symbol of
@@ -207,6 +194,8 @@ maybe_dispatch_symbol_orders(Symbol, State = #state{orders = Orders, ticker_cach
 
 maybe_dispatch_order(Order, Cache) ->
     case maps:get(status, Order, <<"">>) of
+        <<"tracking_position">> ->
+            maybe_close_tracked_position(Order, Cache);
         <<"waiting_ws_ticker">> ->
             maybe_submit_close_from_ticker(Order, Cache);
         <<"awaiting_live_close_fill">> ->
@@ -214,6 +203,27 @@ maybe_dispatch_order(Order, Cache) ->
         <<"partial_live_close_continue">> ->
             maybe_submit_close_from_ticker(Order, Cache);
         _ ->
+            Order
+    end.
+
+maybe_close_tracked_position(Order, Cache) ->
+    Position0 = maps:get(position, Order, #{}),
+    case enrich_close_from_cache(Position0, Cache) of
+        {ok, Position1} ->
+            Req = arbiguard_calc:normalize_request(maps:get(req, Order, #{})),
+            Position = evaluate_position_strategy(settle_funding(Position1), Req),
+            case maps:get(should_close, Position, false) of
+                true ->
+                    CloseOrder = close_plan(Req, Position),
+                    dispatch_close(Req, CloseOrder#{status => <<"waiting_ws_ticker">>,
+                                                    req => Req,
+                                                    position => Position,
+                                                    close_rule => maps:get(close_rule, Position, <<"strategy_close">>)});
+                false ->
+                    Order#{position => maps:without([should_close], Position),
+                           close_rule => maps:get(close_rule, Position, <<"watch">>)}
+            end;
+        wait ->
             Order
     end.
 
@@ -283,6 +293,213 @@ enrich_close_from_cache(Position, Cache) ->
         _ ->
             wait
     end.
+
+settle_funding(Position0) ->
+    Now = arbiguard_util:now_ms(),
+    OpenedAt = arbiguard_util:to_int(maps:get(opened_at, Position0, 0), 0),
+    Position1 = Position0#{
+        long_next_funding_time => advance_funding_time(maps:get(long_next_funding_time, Position0, 0),
+                                                       maps:get(long_funding_interval_hours, Position0, 8), OpenedAt),
+        short_next_funding_time => advance_funding_time(maps:get(short_next_funding_time, Position0, 0),
+                                                        maps:get(short_funding_interval_hours, Position0, 8), OpenedAt)
+    },
+    Position2 = settle_leg(long, Position1, Now, 0),
+    Position3 = settle_leg(short, Position2, Now, 0),
+    recompute_position_pnl(Position3).
+
+settle_leg(_Leg, Position, _Now, Count) when Count >= 1000 ->
+    Position;
+settle_leg(long, Position, Now, Count) ->
+    T = arbiguard_util:to_int(maps:get(long_next_funding_time, Position, 0), 0),
+    case T > 0 andalso Now >= T of
+        true ->
+            Notional = f(maps:get(notional, Position, maps:get(notional_usdt, Position, 0)), 0),
+            Rate = f(maps:get(long_funding_rate, Position, 0), 0),
+            PNL = -Notional * Rate,
+            Next = T + interval_ms(maps:get(long_funding_interval_hours, Position, 8)),
+            settle_leg(long, Position#{funding_pnl => f(maps:get(funding_pnl, Position, 0), 0) + PNL,
+                                       last_funding_settlement_pnl => PNL,
+                                       long_funding_settlement_count => maps:get(long_funding_settlement_count, Position, 0) + 1,
+                                       last_funding_settled_at => T,
+                                       long_next_funding_time => Next}, Now, Count + 1);
+        false -> Position
+    end;
+settle_leg(short, Position, Now, Count) ->
+    T = arbiguard_util:to_int(maps:get(short_next_funding_time, Position, 0), 0),
+    case T > 0 andalso Now >= T of
+        true ->
+            Notional = f(maps:get(notional, Position, maps:get(notional_usdt, Position, 0)), 0),
+            Rate = f(maps:get(short_funding_rate, Position, 0), 0),
+            PNL = Notional * Rate,
+            Next = T + interval_ms(maps:get(short_funding_interval_hours, Position, 8)),
+            settle_leg(short, Position#{funding_pnl => f(maps:get(funding_pnl, Position, 0), 0) + PNL,
+                                        last_funding_settlement_pnl => PNL,
+                                        short_funding_settlement_count => maps:get(short_funding_settlement_count, Position, 0) + 1,
+                                        last_funding_settled_at => T,
+                                        short_next_funding_time => Next}, Now, Count + 1);
+        false -> Position
+    end.
+
+evaluate_position_strategy(Position0, Req) ->
+    Now = arbiguard_util:now_ms(),
+    {Threshold, LockRule} = close_threshold(Position0, Now),
+    Position = recompute_position_pnl(Position0#{close_threshold => Threshold}),
+    PriceGapLimit = f(maps:get(price_gap_close_profit_usdt, Req, 10), 10),
+    Rules = [
+        {emergency_close(Position, Now), emergency_rule(Position, Now)},
+        {delist_profit_close(Position, Now), <<"delist_profit_close">>},
+        {f(maps:get(unrealized_pnl, Position, 0), 0) >= PriceGapLimit, <<"profit_usdt_close">>},
+        {next_funding_loss_close(Position), next_funding_loss_rule(Position)},
+        {after_funding_settlement_close(Position, Req), <<"after_funding_settlement_profit_close">>},
+        {progressive_profit_close(Position), LockRule}
+    ],
+    case first_close_rule(Rules) of
+        none -> Position#{should_close => false, close_rule => <<"watch">>};
+        Rule -> Position#{should_close => true, close_rule => Rule}
+    end.
+
+first_close_rule([]) -> none;
+first_close_rule([{true, Rule} | _]) -> Rule;
+first_close_rule([_ | Rest]) -> first_close_rule(Rest).
+
+close_threshold(Position, Now) ->
+    Next = min_positive(maps:get(long_next_funding_time, Position, 0), maps:get(short_next_funding_time, Position, 0)),
+    Start0 = maps:get(last_funding_settled_at, Position, 0),
+    Start = case Start0 > 0 of true -> Start0; false -> maps:get(opened_at, Position, 0) end,
+    case Next =< Start orelse Next =< Now orelse Start =< 0 of
+        true -> {0.50, <<"post_funding_profit_lock">>};
+        false ->
+            Progress = (Now - Start) / max(1, Next - Start),
+            case Progress of
+                P when P < 0.2 -> {0.95, <<"profit_lock_95">>};
+                P when P < 0.4 -> {0.90, <<"profit_lock_90">>};
+                P when P < 0.6 -> {0.85, <<"profit_lock_85">>};
+                P when P < 0.8 -> {0.80, <<"profit_lock_80">>};
+                _ -> {0.50, <<"profit_lock_50">>}
+            end
+    end.
+
+progressive_profit_close(Position) ->
+    Expected = f(maps:get(expected_net_profit, Position, 0), 0),
+    Unrealized = f(maps:get(unrealized_pnl, Position, 0), 0),
+    Threshold = max(0.5, f(maps:get(close_threshold, Position, 0.5), 0.5)),
+    case Expected =< 0 of
+        true -> Unrealized > 0;
+        false -> Unrealized >= Expected * Threshold orelse (Threshold =< 0.5 andalso Unrealized > 0)
+    end.
+
+next_funding_loss_close(Position) ->
+    maps:get(last_funding_settled_at, Position, 0) > 0 andalso
+    f(maps:get(last_funding_settlement_pnl, Position, 0), 0) > 0 andalso
+    funding_cycle_mismatch(Position) andalso
+    next_funding_event_pnl(Position) =< 0 andalso
+    progressive_profit_close(Position).
+
+next_funding_loss_rule(Position) ->
+    Threshold = f(maps:get(close_threshold, Position, 0.5), 0.5),
+    Unrealized = f(maps:get(unrealized_pnl, Position, 0), 0),
+    case Threshold of
+        T when T >= 0.95 -> <<"next_funding_loss_lock_95">>;
+        T when T >= 0.90 -> <<"next_funding_loss_lock_90">>;
+        T when T >= 0.85 -> <<"next_funding_loss_lock_85">>;
+        T when T >= 0.80 -> <<"next_funding_loss_lock_80">>;
+        _ when Unrealized > 0 -> <<"next_funding_loss_profit_close">>;
+        _ -> <<"next_funding_loss_watch">>
+    end.
+
+after_funding_settlement_close(Position, Req) ->
+    maps:get(last_funding_settled_at, Position, 0) > 0 andalso
+    not (f(maps:get(last_funding_settlement_pnl, Position, 0), 0) > 0 andalso
+         funding_cycle_mismatch(Position) andalso next_funding_event_pnl(Position) =< 0) andalso
+    f(maps:get(unrealized_pnl, Position, 0), 0) >= f(maps:get(price_gap_close_profit_usdt, Req, 10), 10).
+
+delist_profit_close(Position, Now) ->
+    f(maps:get(unrealized_pnl, Position, 0), 0) > 0 andalso
+    (delist_within(maps:get(long_delist_time, Position, 0), Now) orelse
+     delist_within(maps:get(short_delist_time, Position, 0), Now)).
+
+emergency_close(Position, Now) ->
+    Started = maps:get(emergency_started_at, Position, 0),
+    Started > 0 andalso (mark_unrealized_pnl(Position) > 0 orelse Now - Started >= 500).
+
+emergency_rule(Position, Now) ->
+    case Now - maps:get(emergency_started_at, Position, 0) < 500 andalso mark_unrealized_pnl(Position) > 0 of
+        true -> <<"liquidation_hedge_profit_0_5s">>;
+        false -> <<"liquidation_hedge_market_1s">>
+    end.
+
+recompute_position_pnl(Position) ->
+    PricePNL = long_leg_pnl(Position) + short_leg_pnl(Position),
+    FundingPNL = f(maps:get(funding_pnl, Position, 0), 0),
+    CloseFee = close_fee(Position),
+    Position#{price_pnl => PricePNL,
+              close_fee => CloseFee,
+              unrealized_pnl => PricePNL + FundingPNL - CloseFee,
+              updated_at => arbiguard_util:now_ms()}.
+
+long_leg_pnl(Position) ->
+    (f(maps:get(long_current_price, Position, maps:get(long_close_price, Position, 0)), 0) -
+     f(maps:get(long_entry_price, Position, 0), 0)) * f(maps:get(long_qty, Position, 0), 0).
+
+short_leg_pnl(Position) ->
+    (f(maps:get(short_entry_price, Position, 0), 0) -
+     f(maps:get(short_current_price, Position, maps:get(short_close_price, Position, 0)), 0)) *
+     f(maps:get(short_qty, Position, 0), 0).
+
+mark_unrealized_pnl(Position) ->
+    LongMarkPNL = (f(maps:get(long_mark_price, Position, maps:get(long_current_price, Position, 0)), 0) -
+                   f(maps:get(long_entry_price, Position, 0), 0)) * f(maps:get(long_qty, Position, 0), 0),
+    ShortMarkPNL = (f(maps:get(short_entry_price, Position, 0), 0) -
+                    f(maps:get(short_mark_price, Position, maps:get(short_current_price, Position, 0)), 0)) *
+                    f(maps:get(short_qty, Position, 0), 0),
+    LongMarkPNL + ShortMarkPNL + f(maps:get(funding_pnl, Position, 0), 0) - close_fee(Position).
+
+close_fee(Position) ->
+    Notional = f(maps:get(notional, Position, maps:get(notional_usdt, Position, 0)), 0),
+    Notional * (max(0, f(maps:get(long_fee_rate, Position, 0.0005), 0.0005)) +
+                max(0, f(maps:get(short_fee_rate, Position, 0.0005), 0.0005))).
+
+next_funding_event_pnl(Position) ->
+    LongT = maps:get(long_next_funding_time, Position, 0),
+    ShortT = maps:get(short_next_funding_time, Position, 0),
+    Notional = f(maps:get(notional, Position, maps:get(notional_usdt, Position, 0)), 0),
+    case {LongT, ShortT} of
+        {0, 0} -> 0;
+        {L, S} when L > 0, (S =< 0 orelse L < S) -> -Notional * f(maps:get(long_funding_rate, Position, 0), 0);
+        {L, S} when S > 0, (L =< 0 orelse S < L) -> Notional * f(maps:get(short_funding_rate, Position, 0), 0);
+        _ -> Notional * (f(maps:get(short_funding_rate, Position, 0), 0) -
+                         f(maps:get(long_funding_rate, Position, 0), 0))
+    end.
+
+funding_cycle_mismatch(Position) ->
+    abs(max(1, f(maps:get(long_funding_interval_hours, Position, 8), 8)) -
+        max(1, f(maps:get(short_funding_interval_hours, Position, 8), 8))) >= 0.001.
+
+delist_within(T, Now) ->
+    T1 = arbiguard_util:to_int(T, 0),
+    T1 > Now andalso T1 - Now =< 12 * 3600 * 1000.
+
+advance_funding_time(T0, IntervalHours, After) ->
+    T = arbiguard_util:to_int(T0, 0),
+    case T =< 0 orelse After =< 0 of
+        true -> T;
+        false -> advance_funding_time_loop(T, interval_ms(IntervalHours), After)
+    end.
+
+advance_funding_time_loop(T, Step, After) when T =< After ->
+    advance_funding_time_loop(T + Step, Step, After);
+advance_funding_time_loop(T, _Step, _After) ->
+    T.
+
+interval_ms(Hours) ->
+    trunc(max(1, f(Hours, 8)) * 3600000).
+
+min_positive(A, B) when A =< 0 -> B;
+min_positive(A, B) when B =< 0 -> A;
+min_positive(A, B) -> min(A, B).
+
+f(V, D) ->
+    arbiguard_util:to_float(V, D).
 
 ticker_from_symbol_cache_or_ets(Exchange, Symbol, SymbolRows) ->
     case maps:get(Exchange, SymbolRows, undefined) of
