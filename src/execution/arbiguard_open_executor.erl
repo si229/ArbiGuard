@@ -205,16 +205,19 @@ dispatch_order(Req0, Order, Op) ->
                 _ -> #{}
             end,
             OpenFee = maps:get(open_fee, Position, maps:get(open_fee, Op, 0.0)),
-            (public_order(Order#{confirmed_notional => maps:get(target_notional, Order, 0.0),
+            FilledOrder = Order#{status => <<"filled_paper_open">>,
+                                 wait_reason => <<"filled">>,
+                                 wait_detail => execution_ticker_detail(Op),
+                                 confirmed_notional => maps:get(target_notional, Order, 0.0),
                                  remaining_notional => 0.0,
                                  long_filled_qty => maps:get(long_qty, Position, maps:get(long_target_qty, Order, 0.0)),
                                  short_filled_qty => maps:get(short_qty, Position, maps:get(short_target_qty, Order, 0.0)),
                                  execution_fee => OpenFee,
-                                 actual_pnl => maps:get(unrealized_pnl, Position, -OpenFee)}))#{
-                                   status => <<"filled_paper_open">>,
-                                   exchange_submit => <<"skipped_paper_account">>,
-                                   execution_path => <<"ws_ticker_paper_filled_no_exchange_submit">>,
-                                   filled_at => arbiguard_util:now_ms()}
+                                 actual_pnl => maps:get(unrealized_pnl, Position, -OpenFee)},
+            (public_order(FilledOrder))#{
+                exchange_submit => <<"skipped_paper_account">>,
+                execution_path => <<"ws_ticker_paper_filled_no_exchange_submit">>,
+                filled_at => arbiguard_util:now_ms()}
     end,
     maybe_unsubscribe_after_dispatch(FinalOrder),
     FinalOrder.
@@ -343,6 +346,12 @@ enrich_opportunity_from_cache(Op, Req, Cache) ->
                 true ->
                     Op1 = Op#{long_price => LongPrice,
                                short_price => ShortPrice,
+                               long_bid => maps:get(bid, LongRow, 0.0),
+                               long_ask => LongPrice,
+                               long_updated_at => maps:get(updated_at, LongRow, 0),
+                               short_bid => ShortPrice,
+                               short_ask => maps:get(ask, ShortRow, 0.0),
+                               short_updated_at => maps:get(updated_at, ShortRow, 0),
                                long_current_price => LongPrice,
                                short_current_price => ShortPrice,
                                long_trade_mid_price => maps:get(trade_mid_price, LongRow, LongPrice),
@@ -479,6 +488,18 @@ public_order(Order) ->
 filled_status(<<"filled_paper_open">>) -> true;
 filled_status(<<"filled_live_open">>) -> true;
 filled_status(_) -> false.
+
+execution_ticker_detail(Op) ->
+    #{reason => <<"filled">>,
+      long_exchange => maps:get(long_exchange, Op, <<"">>),
+      short_exchange => maps:get(short_exchange, Op, <<"">>),
+      long_bid => maps:get(long_bid, Op, 0.0),
+      long_ask => maps:get(long_ask, Op, maps:get(long_price, Op, 0.0)),
+      long_updated_at => maps:get(long_updated_at, Op, 0),
+      short_bid => maps:get(short_bid, Op, maps:get(short_price, Op, 0.0)),
+      short_ask => maps:get(short_ask, Op, 0.0),
+      short_updated_at => maps:get(short_updated_at, Op, 0),
+      execution_price_updated_at => maps:get(execution_price_updated_at, Op, 0)}.
 
 apply_live_child_update(Parent, Update) ->
     ChildID = maps:get(id, Update, <<"">>),

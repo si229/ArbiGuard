@@ -251,8 +251,6 @@ close_ws(State = #state{ws_conn = ConnPid}) ->
     catch gun:close(ConnPid),
     State.
 
-replay_subscriptions(State = #state{id = <<"binance">>}) ->
-    State;
 replay_subscriptions(State = #state{subscriptions = Subs}) ->
     lists:foldl(fun
         (Symbol, Acc) ->
@@ -324,6 +322,9 @@ ws_endpoint_info(State) ->
 
 subscribe_payload(<<"okx">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{channel => <<"tickers">>, instId => okx_symbol(Symbol)}]});
+subscribe_payload(<<"binance">>, Symbol) ->
+    Stream = <<(string:lowercase(norm_symbol(Symbol)))/binary, "@bookTicker">>,
+    arbiguard_json:encode(#{method => <<"SUBSCRIBE">>, params => [Stream], id => erlang:unique_integer([positive])});
 subscribe_payload(<<"gate">>, Symbol) ->
     arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.tickers">>,
                             event => <<"subscribe">>, payload => [gate_symbol(Symbol)]});
@@ -337,6 +338,9 @@ subscribe_payload(_, _Symbol) ->
 
 unsubscribe_payload(<<"okx">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{channel => <<"tickers">>, instId => okx_symbol(Symbol)}]});
+unsubscribe_payload(<<"binance">>, Symbol) ->
+    Stream = <<(string:lowercase(norm_symbol(Symbol)))/binary, "@bookTicker">>,
+    arbiguard_json:encode(#{method => <<"UNSUBSCRIBE">>, params => [Stream], id => erlang:unique_integer([positive])});
 unsubscribe_payload(<<"gate">>, Symbol) ->
     arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.tickers">>,
                             event => <<"unsubscribe">>, payload => [gate_symbol(Symbol)]});
@@ -345,10 +349,6 @@ unsubscribe_payload(<<"htx">>, Symbol) ->
     arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".depth.step0">>, id => Symbol});
 unsubscribe_payload(<<"weex">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
-unsubscribe_payload(<<"binance">>, _Symbol) ->
-    %% Binance uses the all-market !bookTicker stream in this process, so a
-    %% per-symbol unsubscribe is not available for the current connection.
-    undefined;
 unsubscribe_payload(_, _Symbol) ->
     undefined.
 

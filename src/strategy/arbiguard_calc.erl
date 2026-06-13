@@ -35,7 +35,7 @@ default_scan() ->
 default_exchanges() ->
     [#{id => <<"binance">>, name => <<"Binance">>, enabled => true,
        base_url => <<"https://fapi.binance.com">>,
-       ws_host => <<"fstream.binance.com">>, ws_port => 443, ws_path => <<"/public/ws/!bookTicker">>,
+       ws_host => <<"fstream.binance.com">>, ws_port => 443, ws_path => <<"/public/ws">>,
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
      #{id => <<"okx">>, name => <<"OKX">>, enabled => true,
        base_url => <<"https://www.okx.com">>,
