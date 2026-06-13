@@ -41,11 +41,11 @@ handle_call(start_ws, _From, State) ->
 handle_call({subscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
     NewSubs = Subs#{Symbol => Reason},
-    lager:info("ticker subscribe exchange=~s symbol=~s reason=~p", [State#state.id, Symbol, Reason]),
+    lager:log(info, self(), "ticker subscribe exchange=~s symbol=~s reason=~p", [State#state.id, Symbol, Reason]),
     {reply, ok, State#state{subscriptions = NewSubs}};
 handle_call({unsubscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
-    lager:info("ticker unsubscribe exchange=~s symbol=~s reason=~p", [State#state.id, Symbol, Reason]),
+    lager:log(info, self(), "ticker unsubscribe exchange=~s symbol=~s reason=~p", [State#state.id, Symbol, Reason]),
     {reply, ok, State#state{subscriptions = maps:remove(Symbol, Subs)}};
 handle_call(snapshot, _From, State = #state{subscriptions = Subs, ws_enabled = WSEnabled}) ->
     {reply, #{exchange => State#state.id, ws_enabled => WSEnabled, subscriptions => maps:keys(Subs)}, State};
@@ -78,7 +78,7 @@ do_start_ws(State) ->
     %% Placeholder for exchange-specific WS connection.
     %% This process owns subscription state; concrete WS adapters will reconnect
     %% and replay State#state.subscriptions after reconnect.
-    lager:info("ticker ws start exchange=~s", [State#state.id]),
+    lager:log(info, self(), "ticker ws start exchange=~s", [State#state.id]),
     State#state{ws_enabled = true}.
 
 norm_symbol(V) ->

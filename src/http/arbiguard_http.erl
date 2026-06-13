@@ -13,7 +13,7 @@ init([Port]) ->
     {ok, Listen} = gen_tcp:listen(Port, [binary, {packet, raw}, {active, false},
                                         {reuseaddr, true}, {ip, {127,0,0,1}}]),
     self() ! accept,
-    lager:info("ArbiGuard admin listening on http://127.0.0.1:~p", [Port]),
+    lager:log(info, self(), "ArbiGuard admin listening on http://127.0.0.1:~p", [Port]),
     {ok, #state{listen = Listen, port = Port}}.
 
 handle_call(_Req, _From, State) ->

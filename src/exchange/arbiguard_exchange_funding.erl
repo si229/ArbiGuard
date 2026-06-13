@@ -56,10 +56,10 @@ do_refresh(State = #state{exchange = Exchange, id = ID}) ->
     case arbiguard_market:fetch(Exchange) of
         {ok, Rows} ->
             [store_market_row(Row) || Row <- Rows],
-            lager:info("funding refresh exchange=~s rows=~p", [ID, length(Rows)]),
+            lager:log(info, self(), "funding refresh exchange=~s rows=~p", [ID, length(Rows)]),
             {ok, State#state{last_refresh = arbiguard_util:now_ms(), last_count = length(Rows), last_error = undefined}};
         {error, Reason} ->
-            lager:warning("funding refresh failed exchange=~s reason=~p", [ID, Reason]),
+            lager:log(warning, self(), "funding refresh failed exchange=~s reason=~p", [ID, Reason]),
             {{error, Reason}, State#state{last_refresh = arbiguard_util:now_ms(), last_error = Reason}}
     end.
 
