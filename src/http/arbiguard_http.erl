@@ -13,7 +13,7 @@ init([Port]) ->
     {ok, Listen} = gen_tcp:listen(Port, [binary, {packet, raw}, {active, false},
                                         {reuseaddr, true}, {ip, {127,0,0,1}}]),
     self() ! accept,
-    io:format("ArbiGuard admin listening on http://127.0.0.1:~p~n", [Port]),
+    lager:info("ArbiGuard admin listening on http://127.0.0.1:~p", [Port]),
     {ok, #state{listen = Listen, port = Port}}.
 
 handle_call(_Req, _From, State) ->
@@ -96,6 +96,10 @@ route(#{method := <<"GET">>, path := <<"/api/health">>}) ->
     json_response(200, #{ok => true, app => <<"ArbiGuard">>});
 route(#{method := <<"GET">>, path := <<"/api/config">>}) ->
     json_response(200, arbiguard_config:snapshot());
+route(#{method := <<"GET">>, path := <<"/api/processes">>}) ->
+    json_response(200, arbiguard_processes:snapshot());
+route(#{method := <<"GET">>, path := <<"/api/executor/state">>}) ->
+    json_response(200, arbiguard_executor:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/funding/state">>}) ->
     json_response(200, arbiguard_state:snapshot());
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
@@ -103,8 +107,8 @@ route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Bo
     json_response(200, arbiguard_state:reset_paper(Payload));
 route(#{method := <<"POST">>, path := <<"/api/funding/scan">>, body := Body}) ->
     Payload = safe_decode(Body),
-    Result = arbiguard_scanner:scan(Payload),
-    Paper = arbiguard_state:submit_scan(Payload, Result),
+    Result = arbiguard_scanner:scan_once(Payload),
+    Paper = arbiguard_state:snapshot(),
     json_response(200, Result#{paper_account => Paper});
 route(#{method := <<"GET">>, path := <<"/">>}) ->
     html_response(200, index_html());

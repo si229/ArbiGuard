@@ -11,6 +11,66 @@ This project is intentionally separated from the AI/model-training code. It keep
 - HTTP management API
 - Windows-compatible OTP dependencies only
 
+## OTP Process Layout
+
+```text
+arbiguard_sup
+  ├─ core/
+  │  ├─ arbiguard_app
+  │  ├─ arbiguard_sup
+  │  ├─ arbiguard_ets
+  │  ├─ arbiguard_config
+  │  └─ arbiguard_processes
+  ├─ account/
+  │  └─ arbiguard_state
+  ├─ execution/
+  │  └─ arbiguard_executor
+  ├─ exchange/
+  │  ├─ arbiguard_market
+  │  ├─ arbiguard_exchange_ticker
+  │  └─ arbiguard_exchange_funding
+  ├─ strategy/
+  │  ├─ arbiguard_calc
+  │  └─ arbiguard_scanner
+  ├─ http/
+  │  └─ arbiguard_http
+  └─ support/
+     ├─ arbiguard_json
+     └─ arbiguard_util
+```
+
+Runtime process tree:
+
+```text
+arbiguard_sup
+  ├─ arbiguard_ets
+  │    ├─ arbiguard_ticker_ets
+  │    ├─ arbiguard_funding_ets
+  │    └─ arbiguard_opportunity_ets
+  ├─ arbiguard_state
+  │    └─ paper/live account, positions, exchange balances, token configs
+  ├─ arbiguard_executor
+  │    └─ execution orders, target notional/qty, ticker subscriptions
+  ├─ arbiguard_exchange_ticker per exchange
+  │    └─ start_ws / subscribe / unsubscribe / ticker updates
+  ├─ arbiguard_exchange_funding per exchange
+  │    └─ periodic funding REST refresh into ETS
+  ├─ arbiguard_scanner
+  │    └─ reads ETS ticker/funding data and detects opportunities
+  └─ arbiguard_http
+       └─ management API
+```
+
+Current flow:
+
+```text
+exchange_funding -> ETS funding/ticker baseline
+exchange_ticker  -> ETS live ticker
+scanner          -> reads ETS and finds opportunities
+executor         -> creates execution order and subscribes ticker legs
+state            -> maintains simulated account and positions
+```
+
 ## Run
 
 ```powershell
@@ -36,6 +96,8 @@ cd E:\contract\ArbiGuard
 ```text
 GET  /api/health
 GET  /api/config
+GET  /api/processes
+GET  /api/executor/state
 GET  /api/funding/state
 POST /api/funding/scan
 POST /api/funding/paper/reset
@@ -46,6 +108,13 @@ Runtime configuration lives in:
 ```text
 config/sys.config
 config/vm.args
+```
+
+Logs use lager:
+
+```text
+log/arbiguard.log
+log/error.log
 ```
 
 Important keys:

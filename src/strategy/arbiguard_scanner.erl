@@ -1,6 +1,52 @@
 -module(arbiguard_scanner).
+-behaviour(gen_server).
 
--export([scan/1]).
+-export([start_link/0, scan/1, scan_once/1, snapshot/0]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+
+-record(state, {req = #{}, interval_ms = 1000, last_result = #{}, last_scan = 0}).
+
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+scan_once(Req) ->
+    gen_server:call(?MODULE, {scan_once, Req}, 30000).
+
+snapshot() ->
+    gen_server:call(?MODULE, snapshot).
+
+init([]) ->
+    Interval = application:get_env(arbiguard, scanner_interval_ms, 1000),
+    erlang:send_after(Interval, self(), scan_tick),
+    {ok, #state{interval_ms = Interval}}.
+
+handle_call({scan_once, Req}, _From, State) ->
+    Result = run_scan(Req),
+    arbiguard_executor:notify_opportunities(Req, Result),
+    {reply, Result, State#state{req = Req, last_result = Result, last_scan = arbiguard_util:now_ms()}};
+handle_call(snapshot, _From, State) ->
+    {reply, #{last_scan => State#state.last_scan,
+              interval_ms => State#state.interval_ms,
+              last_result => State#state.last_result}, State};
+handle_call(_Req, _From, State) ->
+    {reply, ok, State}.
+
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info(scan_tick, State = #state{req = Req, interval_ms = Interval}) ->
+    Result = scan_from_ets(Req),
+    arbiguard_executor:notify_opportunities(Req, Result),
+    erlang:send_after(Interval, self(), scan_tick),
+    {noreply, State#state{last_result = Result, last_scan = arbiguard_util:now_ms()}};
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+terminate(_Reason, _State) ->
+    ok.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 scan(Req0) ->
     Req = arbiguard_calc:normalize_request(Req0),
@@ -24,6 +70,31 @@ scan(Req0) ->
       exchanges => maps:get(exchanges, Req),
       warnings => Warnings,
       updated_at => iso_now()}.
+
+scan_from_ets(Req0) ->
+    Req1 = Req0#{market_snapshots => merge_ets_market()},
+    scan(Req1).
+
+run_scan(Req) ->
+    case maps:is_key(market_snapshots, Req) of
+        true -> scan(Req);
+        false -> scan_from_ets(Req)
+    end.
+
+merge_ets_market() ->
+    FundingRows = arbiguard_ets:all_funding(),
+    TickerByKey = maps:from_list([{{maps:get(exchange, T, <<"">>), maps:get(symbol, T, <<"">>)}, T} || T <- arbiguard_ets:all_tickers()]),
+    [merge_ticker(Row, maps:get({maps:get(exchange, Row, <<"">>), maps:get(symbol, Row, <<"">>)}, TickerByKey, #{})) || Row <- FundingRows].
+
+merge_ticker(Funding, Ticker) when map_size(Ticker) =:= 0 ->
+    Funding;
+merge_ticker(Funding, Ticker) ->
+    Funding#{
+        mark_price => arbiguard_util:to_float(maps:get(mark_price, Ticker, maps:get(price, Ticker, maps:get(mark_price, Funding, 0))), maps:get(mark_price, Funding, 0)),
+        bid => maps:get(bid, Ticker, maps:get(bid, Funding, 0)),
+        ask => maps:get(ask, Ticker, maps:get(ask, Funding, 0)),
+        updated_at => maps:get(updated_at, Ticker, maps:get(updated_at, Funding, 0))
+    }.
 
 load_market(Req) ->
     case maps:get(market_snapshots, Req, undefined) of

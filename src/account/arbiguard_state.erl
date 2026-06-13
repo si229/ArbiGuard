@@ -1,10 +1,11 @@
 -module(arbiguard_state).
 -behaviour(gen_server).
 
--export([start_link/1, snapshot/0, reset_paper/1, submit_scan/2]).
+-export([start_link/1, snapshot/0, reset_paper/1, submit_scan/2, apply_open_order/3,
+         set_exchange_token/2, get_exchange_token/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {paper}).
+-record(state, {paper, tokens = #{}}).
 
 start_link(Capital) ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [Capital], []).
@@ -18,11 +19,21 @@ reset_paper(Payload) ->
 submit_scan(Req, Result) ->
     gen_server:call(?MODULE, {submit_scan, Req, Result}).
 
+apply_open_order(Req, Order, Opportunity) ->
+    gen_server:call(?MODULE, {apply_open_order, Req, Order, Opportunity}).
+
+set_exchange_token(ExchangeID, TokenConfig) ->
+    gen_server:call(?MODULE, {set_exchange_token, ExchangeID, TokenConfig}).
+
+get_exchange_token(ExchangeID) ->
+    gen_server:call(?MODULE, {get_exchange_token, ExchangeID}).
+
 init([Capital]) ->
     {ok, #state{paper = new_paper(Capital)}}.
 
-handle_call(snapshot, _From, State = #state{paper = Paper}) ->
-    {reply, paper_snapshot(Paper), State};
+handle_call(snapshot, _From, State = #state{paper = Paper, tokens = Tokens}) ->
+    Snapshot = paper_snapshot(Paper),
+    {reply, Snapshot#{token_exchanges => maps:keys(Tokens)}, State};
 handle_call({reset_paper, Payload}, _From, State) ->
     Capital = arbiguard_util:to_float(maps:get(capital_usdt, Payload, 10000), 10000),
     Paper = new_paper(Capital),
@@ -30,6 +41,20 @@ handle_call({reset_paper, Payload}, _From, State) ->
 handle_call({submit_scan, Req, Result}, _From, State = #state{paper = Paper0}) ->
     Paper = update_paper(Paper0, Req, Result),
     {reply, paper_snapshot(Paper), State#state{paper = Paper}};
+handle_call({apply_open_order, Req0, Order, Opportunity}, _From, State = #state{paper = Paper0}) ->
+    Req = arbiguard_calc:normalize_request(Req0),
+    Paper1 = ensure_exchange_balances(Paper0, maps:get(exchanges, Req, [])),
+    Key = maps:get(id, Order),
+    Notional = maps:get(target_notional, Order, maps:get(suggested_notional, Opportunity, 0)),
+    Paper2 = open_position(Paper1, Req, Key, Opportunity, Notional),
+    Paper = refresh_equity(Paper2#{updated_at => iso_now()}),
+    {reply, paper_snapshot(Paper), State#state{paper = Paper}};
+handle_call({set_exchange_token, ExchangeID0, TokenConfig}, _From, State = #state{tokens = Tokens}) ->
+    ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
+    {reply, ok, State#state{tokens = Tokens#{ExchangeID => TokenConfig}}};
+handle_call({get_exchange_token, ExchangeID0}, _From, State = #state{tokens = Tokens}) ->
+    ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
+    {reply, maps:get(ExchangeID, Tokens, undefined), State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
