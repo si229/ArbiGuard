@@ -150,6 +150,7 @@ connect_ws(State, Host, Port, Path) ->
     HostName = binary_to_list(Host),
     OpenOpts = #{transport => tls,
                  protocols => [http],
+                 tcp_opts => [inet],
                  tls_opts => [{server_name, HostName}]},
     case gun:open(HostName, Port, OpenOpts) of
         {ok, ConnPid} ->

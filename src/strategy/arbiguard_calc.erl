@@ -46,7 +46,7 @@ default_exchanges() ->
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
      #{id => <<"weex">>, name => <<"WEEX">>, enabled => true,
        base_url => <<"https://api-contract.weex.com">>,
-       ws_host => <<"wspap.weex.com">>, ws_port => 443, ws_path => <<"/v2/ws/public">>,
+       ws_host => <<"ws-contract.weex.com">>, ws_port => 443, ws_path => <<"/v3/ws/public">>,
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, funding_interval_hours => 8},
      #{id => <<"htx">>, name => <<"HTX">>, enabled => true,
        base_url => <<"https://api.hbdm.com">>,
