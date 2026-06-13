@@ -397,7 +397,9 @@ maybe_write_ticker(Msg, State = #state{id = <<"binance">> = ID}) ->
         Symbol ->
             Bid = arbiguard_util:to_float(map_get_any([b, <<"b">>], Msg, 0), 0),
             Ask = arbiguard_util:to_float(map_get_any([a, <<"a">>], Msg, 0), 0),
-            write_ticker(ID, Symbol, Bid, Ask, 0, 0, <<"not_in_bookticker">>, State)
+            BidQty = arbiguard_util:to_float(map_get_any([<<"B">>, bidQty, <<"bidQty">>], Msg, 0), 0),
+            AskQty = arbiguard_util:to_float(map_get_any([<<"A">>, askQty, <<"askQty">>], Msg, 0), 0),
+            write_ticker(ID, Symbol, Bid, Ask, BidQty, AskQty, 0, 0, <<"not_in_bookticker">>, State)
     end;
 maybe_write_ticker(Msg, State = #state{id = <<"okx">> = ID}) ->
     Data = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
@@ -405,6 +407,8 @@ maybe_write_ticker(Msg, State = #state{id = <<"okx">> = ID}) ->
                   undo_okx_symbol(map_get_any([instId, <<"instId">>], Row, <<"">>)),
                   best_bid(Row, [bidPx, <<"bidPx">>]),
                   best_ask(Row, [askPx, <<"askPx">>]),
+                  best_size(Row, [bidSz, <<"bidSz">>], bid),
+                  best_size(Row, [askSz, <<"askSz">>], ask),
                   arbiguard_util:to_float(map_get_any([last, <<"last">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([markPx, mark_price, <<"markPx">>, <<"mark_price">>], Row, 0), 0),
                   <<"ws_bbo_tbt">>,
@@ -417,6 +421,8 @@ maybe_write_ticker(Msg, State = #state{id = <<"gate">> = ID}) ->
                   undo_gate_symbol(map_get_any([contract, s, symbol, <<"contract">>, <<"s">>, <<"symbol">>], Row, <<"">>)),
                   best_bid(Row, [b, bid, highest_bid, bid1, <<"b">>, <<"bid">>, <<"highest_bid">>, <<"bid1">>]),
                   best_ask(Row, [a, ask, lowest_ask, ask1, <<"a">>, <<"ask">>, <<"lowest_ask">>, <<"ask1">>]),
+                  best_size(Row, [bid_size, bidSize, size, <<"B">>, <<"bid_size">>, <<"bidSize">>, <<"size">>], bid),
+                  best_size(Row, [ask_size, askSize, size, <<"A">>, <<"ask_size">>, <<"askSize">>, <<"size">>], ask),
                   arbiguard_util:to_float(map_get_any([last, <<"last">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Row, 0), 0),
                   <<"ws_book_ticker">>,
@@ -429,15 +435,19 @@ maybe_write_ticker(Msg, State = #state{id = <<"htx">> = ID}) ->
     Symbol = htx_symbol_from_channel(Ch),
     Bid = side_price(map_get_any([bid, bids, <<"bid">>, <<"bids">>], Tick, [])),
     Ask = side_price(map_get_any([ask, asks, <<"ask">>, <<"asks">>], Tick, [])),
+    BidQty = side_qty(map_get_any([bid, bids, <<"bid">>, <<"bids">>], Tick, [])),
+    AskQty = side_qty(map_get_any([ask, asks, <<"ask">>, <<"asks">>], Tick, [])),
     Last = arbiguard_util:to_float(map_get_any([close, <<"close">>], Tick, 0), 0),
     Mark = arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Tick, 0), 0),
-    case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, Last, Mark, <<"ws_bbo">>, State) end;
+    case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, BidQty, AskQty, Last, Mark, <<"ws_bbo">>, State) end;
 maybe_write_ticker(Msg, State = #state{id = <<"weex">> = ID}) ->
     Rows = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
     [write_ticker(ID,
                   map_get_any([symbol, instId, <<"symbol">>, <<"instId">>], Row, <<"">>),
                   arbiguard_util:to_float(map_get_any([bidPr, bid, bidPx, bestBid, <<"bidPr">>, <<"bid">>, <<"bidPx">>, <<"bestBid">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([askPr, ask, askPx, bestAsk, <<"askPr">>, <<"ask">>, <<"askPx">>, <<"bestAsk">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([bidSz, bidSize, bidQty, <<"bidSz">>, <<"bidSize">>, <<"bidQty">>], Row, 0), 0),
+                  arbiguard_util:to_float(map_get_any([askSz, askSize, askQty, <<"askSz">>, <<"askSize">>, <<"askQty">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([lastPr, last, lastPrice, <<"lastPr">>, <<"last">>, <<"lastPrice">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([markPrice, mark_price, markPx, <<"markPrice">>, <<"mark_price">>, <<"markPx">>], Row, 0), 0),
                   <<"ws_ticker">>,
@@ -447,7 +457,7 @@ maybe_write_ticker(Msg, State = #state{id = <<"weex">> = ID}) ->
 maybe_write_ticker(_Msg, _State) ->
     ok.
 
-write_ticker(ID, Symbol0, Bid, Ask, Last, Mark0, MarkSource, State) ->
+write_ticker(ID, Symbol0, Bid, Ask, BidQty, AskQty, Last, Mark0, MarkSource, State) ->
     Symbol = norm_symbol(Symbol0),
     Prev = case arbiguard_ets:get_ticker(ID, Symbol) of {ok, PrevRow} -> PrevRow; _ -> #{} end,
     TradeMid = trade_mid(Bid, Ask, Last),
@@ -463,6 +473,10 @@ write_ticker(ID, Symbol0, Bid, Ask, Last, Mark0, MarkSource, State) ->
                 symbol => Symbol,
                 bid => Bid,
                 ask => Ask,
+                bid_size => BidQty,
+                ask_size => AskQty,
+                bid_levels => levels(Bid, BidQty),
+                ask_levels => levels(Ask, AskQty),
                 last_price => Last,
                 trade_mid_price => TradeMid,
                 mark_price => Mark,
@@ -532,6 +546,29 @@ side_price([Price | _]) ->
     arbiguard_util:to_float(Price, 0);
 side_price(Value) ->
     arbiguard_util:to_float(Value, 0).
+
+side_qty([[_, Qty | _] | _]) ->
+    arbiguard_util:to_float(Qty, 0);
+side_qty([_, Qty | _]) ->
+    arbiguard_util:to_float(Qty, 0);
+side_qty(_Value) ->
+    0.0.
+
+best_size(Row, FallbackKeys, bid) ->
+    case side_qty(map_get_any([bids, bid, <<"bids">>, <<"bid">>], Row, [])) of
+        0 -> arbiguard_util:to_float(map_get_any(FallbackKeys, Row, 0), 0);
+        Qty -> Qty
+    end;
+best_size(Row, FallbackKeys, ask) ->
+    case side_qty(map_get_any([asks, ask, <<"asks">>, <<"ask">>], Row, [])) of
+        0 -> arbiguard_util:to_float(map_get_any(FallbackKeys, Row, 0), 0);
+        Qty -> Qty
+    end.
+
+levels(Price, Qty) when Price > 0, Qty > 0 ->
+    [#{price => Price, qty => Qty, notional => Price * Qty}];
+levels(_Price, _Qty) ->
+    [].
 
 normalize_subscription(Subscription) when is_map(Subscription) ->
     maps:map(fun(_Reason, Pids) -> normalize_pids(Pids) end, Subscription);

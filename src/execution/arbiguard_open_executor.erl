@@ -315,7 +315,9 @@ maybe_submit_from_ticker_1(Order, Cache) ->
                         maps:get(short_exchange, Op, <<"">>), maps:get(long_price, Op, 0),
                         maps:get(short_price, Op, 0), maps:get(long_mark_price, Op, 0),
                         maps:get(short_mark_price, Op, 0), maps:get(suggested_notional, Op, 0)]),
-            dispatch_order(Req, public_order(apply_remaining_order(Order)), Op);
+            Order1 = public_order(apply_remaining_order(Order)),
+            DispatchNotional = maps:get(suggested_notional, Op, maps:get(target_notional, Order1, 0.0)),
+            dispatch_order(Req, Order1#{target_notional => DispatchNotional}, Op);
         {wait, WaitInfo} ->
             Order#{wait_reason => maps:get(reason, WaitInfo, <<"waiting_ws_ticker">>),
                    wait_detail => WaitInfo,
@@ -347,12 +349,19 @@ enrich_opportunity_from_cache(Op, Req, Cache) ->
     case {ticker_from_symbol_cache_or_ets(LongEx, Symbol, SymbolRows),
           ticker_from_symbol_cache_or_ets(ShortEx, Symbol, SymbolRows)} of
         {LongRow, ShortRow} when is_map(LongRow), is_map(ShortRow) ->
-            LongPrice = maps:get(ask, LongRow, 0.0),
-            ShortPrice = maps:get(bid, ShortRow, 0.0),
-            case LongPrice > 0 andalso ShortPrice > 0 of
+            Target = maps:get(suggested_notional, Op, maps:get(execution_notional_usdt, Req, 200.0)),
+            LongFill0 = fill_notional(LongRow, ask_levels, ask, Target),
+            ShortFill0 = fill_notional(ShortRow, bid_levels, bid, Target),
+            FillNotional = min(maps:get(filled_notional, LongFill0, 0.0), maps:get(filled_notional, ShortFill0, 0.0)),
+            LongFill = fill_notional(LongRow, ask_levels, ask, FillNotional),
+            ShortFill = fill_notional(ShortRow, bid_levels, bid, FillNotional),
+            LongPrice = maps:get(avg_price, LongFill, 0.0),
+            ShortPrice = maps:get(avg_price, ShortFill, 0.0),
+            case FillNotional > 0 andalso LongPrice > 0 andalso ShortPrice > 0 of
                 true ->
                     Op1 = Op#{long_price => LongPrice,
                                short_price => ShortPrice,
+                               suggested_notional => FillNotional,
                                long_bid => maps:get(bid, LongRow, 0.0),
                                long_ask => LongPrice,
                                long_updated_at => maps:get(updated_at, LongRow, 0),
@@ -367,7 +376,11 @@ enrich_opportunity_from_cache(Op, Req, Cache) ->
                                short_mark_price => maps:get(mark_price, ShortRow, ShortPrice),
                                long_liquidation_reference_price => maps:get(liquidation_reference_price, LongRow, LongPrice),
                                short_liquidation_reference_price => maps:get(liquidation_reference_price, ShortRow, ShortPrice),
-                               execution_price_basis => <<"ws_bid_ask_or_latest_ets">>,
+                               long_depth_notional => maps:get(filled_notional, LongFill, 0.0),
+                               short_depth_notional => maps:get(filled_notional, ShortFill, 0.0),
+                               long_depth_qty => maps:get(filled_qty, LongFill, 0.0),
+                               short_depth_qty => maps:get(filled_qty, ShortFill, 0.0),
+                               execution_price_basis => maps:get(source, LongFill, <<"ws_depth_or_bbo">>),
                                liquidation_price_basis => <<"mark_price">>,
                                execution_price_updated_at => min(maps:get(updated_at, LongRow, 0), maps:get(updated_at, ShortRow, 0))},
                     require_profitable(refresh_expected_profit(Op1, Req), Req);
@@ -414,6 +427,48 @@ int_or_zero(Row, Key) when is_map(Row) ->
     arbiguard_util:to_int(maps:get(Key, Row, 0), 0);
 int_or_zero(_Row, _Key) ->
     0.
+
+fill_notional(_Row, _LevelsKey, _PriceKey, Target) when Target =< 0 ->
+    #{filled_notional => 0.0, filled_qty => 0.0, avg_price => 0.0, source => <<"empty_target">>};
+fill_notional(Row, LevelsKey, PriceKey, Target) ->
+    Levels = maps:get(LevelsKey, Row, []),
+    case fill_levels(Levels, Target, 0.0, 0.0) of
+        #{filled_notional := N, filled_qty := Q} = Fill when N > 0, Q > 0 ->
+            Fill#{avg_price => N / Q, source => <<"ws_depth_levels">>};
+        _ ->
+            Price = price_or_zero(Row, PriceKey),
+            Qty = price_or_zero(Row, size_key(PriceKey)),
+            case Price > 0 of
+                true ->
+                    MaxNotional = case Qty > 0 of true -> Price * Qty; false -> Target end,
+                    Filled = min(Target, MaxNotional),
+                    #{filled_notional => Filled,
+                      filled_qty => safe_div(Filled, Price),
+                      avg_price => Price,
+                      source => case Qty > 0 of true -> <<"ws_bbo_size">>; false -> <<"ws_bbo_no_size">> end};
+                false ->
+                    #{filled_notional => 0.0, filled_qty => 0.0, avg_price => 0.0, source => <<"missing_price">>}
+            end
+    end.
+
+fill_levels(_Levels, Target, Notional, Qty) when Notional >= Target ->
+    #{filled_notional => Target, filled_qty => Qty, avg_price => safe_div(Target, Qty)};
+fill_levels([], _Target, Notional, Qty) ->
+    #{filled_notional => Notional, filled_qty => Qty, avg_price => safe_div(Notional, Qty)};
+fill_levels([Level | Rest], Target, Notional, Qty) ->
+    Price = price_or_zero(Level, price),
+    LevelQty = price_or_zero(Level, qty),
+    LevelNotional = case maps:get(notional, Level, 0) of
+        N when N > 0 -> N;
+        _ -> Price * LevelQty
+    end,
+    Need = max(0.0, Target - Notional),
+    Take = min(Need, LevelNotional),
+    TakeQty = safe_div(Take, Price),
+    fill_levels(Rest, Target, Notional + Take, Qty + TakeQty).
+
+size_key(ask) -> ask_size;
+size_key(bid) -> bid_size.
 
 ticker_from_symbol_cache_or_ets(Exchange, Symbol, SymbolRows) ->
     case maps:get(Exchange, SymbolRows, undefined) of

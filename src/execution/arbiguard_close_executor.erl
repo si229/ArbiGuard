@@ -312,9 +312,14 @@ enrich_close_from_cache(Position, Cache) ->
           ticker_from_symbol_cache_or_ets(ShortEx, Symbol, SymbolRows)} of
         {LongRow, ShortRow} when is_map(LongRow), is_map(ShortRow) ->
             %% Close long with bid, close short with ask.
-            LongClose = maps:get(bid, LongRow, 0.0),
-            ShortClose = maps:get(ask, ShortRow, 0.0),
-            case LongClose > 0 andalso ShortClose > 0 of
+            Target = maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0)),
+            LongFill = fill_notional(LongRow, bid_levels, bid, Target),
+            ShortFill = fill_notional(ShortRow, ask_levels, ask, Target),
+            LongClose = maps:get(avg_price, LongFill, 0.0),
+            ShortClose = maps:get(avg_price, ShortFill, 0.0),
+            LongEnough = maps:get(filled_notional, LongFill, 0.0) >= Target * 0.999,
+            ShortEnough = maps:get(filled_notional, ShortFill, 0.0) >= Target * 0.999,
+            case Target > 0 andalso LongClose > 0 andalso ShortClose > 0 andalso LongEnough andalso ShortEnough of
                 true ->
                     {ok, Position#{long_close_price => LongClose,
                                    short_close_price => ShortClose,
@@ -326,7 +331,11 @@ enrich_close_from_cache(Position, Cache) ->
                                    short_mark_price => maps:get(mark_price, ShortRow, ShortClose),
                                    long_liquidation_reference_price => maps:get(liquidation_reference_price, LongRow, LongClose),
                                    short_liquidation_reference_price => maps:get(liquidation_reference_price, ShortRow, ShortClose),
-                                   execution_price_basis => <<"ws_bid_ask">>,
+                                   long_close_depth_notional => maps:get(filled_notional, LongFill, 0.0),
+                                   short_close_depth_notional => maps:get(filled_notional, ShortFill, 0.0),
+                                   long_close_depth_qty => maps:get(filled_qty, LongFill, 0.0),
+                                   short_close_depth_qty => maps:get(filled_qty, ShortFill, 0.0),
+                                   execution_price_basis => maps:get(source, LongFill, <<"ws_depth_or_bbo">>),
                                    liquidation_price_basis => <<"mark_price">>,
                                    execution_price_updated_at => min(maps:get(updated_at, LongRow, 0), maps:get(updated_at, ShortRow, 0))}};
                 false -> wait
@@ -720,3 +729,45 @@ update_symbol_cache(Row, Cache) ->
     Exchange = maps:get(exchange, Row, <<"">>),
     SymbolRows0 = maps:get(Symbol, Cache, #{}),
     Cache#{Symbol => SymbolRows0#{Exchange => Row}}.
+
+fill_notional(_Row, _LevelsKey, _PriceKey, Target) when Target =< 0 ->
+    #{filled_notional => 0.0, filled_qty => 0.0, avg_price => 0.0, source => <<"empty_target">>};
+fill_notional(Row, LevelsKey, PriceKey, Target) ->
+    Levels = maps:get(LevelsKey, Row, []),
+    case fill_levels(Levels, Target, 0.0, 0.0) of
+        #{filled_notional := N, filled_qty := Q} = Fill when N > 0, Q > 0 ->
+            Fill#{avg_price => N / Q, source => <<"ws_depth_levels">>};
+        _ ->
+            Price = f(maps:get(PriceKey, Row, 0), 0),
+            Qty = f(maps:get(size_key(PriceKey), Row, 0), 0),
+            case Price > 0 of
+                true ->
+                    MaxNotional = case Qty > 0 of true -> Price * Qty; false -> Target end,
+                    Filled = min(Target, MaxNotional),
+                    #{filled_notional => Filled,
+                      filled_qty => safe_div(Filled, Price),
+                      avg_price => Price,
+                      source => case Qty > 0 of true -> <<"ws_bbo_size">>; false -> <<"ws_bbo_no_size">> end};
+                false ->
+                    #{filled_notional => 0.0, filled_qty => 0.0, avg_price => 0.0, source => <<"missing_price">>}
+            end
+    end.
+
+fill_levels(_Levels, Target, Notional, Qty) when Notional >= Target ->
+    #{filled_notional => Target, filled_qty => Qty, avg_price => safe_div(Target, Qty)};
+fill_levels([], _Target, Notional, Qty) ->
+    #{filled_notional => Notional, filled_qty => Qty, avg_price => safe_div(Notional, Qty)};
+fill_levels([Level | Rest], Target, Notional, Qty) ->
+    Price = f(maps:get(price, Level, 0), 0),
+    LevelQty = f(maps:get(qty, Level, 0), 0),
+    LevelNotional = case maps:get(notional, Level, 0) of
+        N when N > 0 -> N;
+        _ -> Price * LevelQty
+    end,
+    Need = max(0.0, Target - Notional),
+    Take = min(Need, LevelNotional),
+    TakeQty = safe_div(Take, Price),
+    fill_levels(Rest, Target, Notional + Take, Qty + TakeQty).
+
+size_key(ask) -> ask_size;
+size_key(bid) -> bid_size.
