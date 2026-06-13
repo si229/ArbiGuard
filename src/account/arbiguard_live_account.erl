@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0, snapshot/0, set_exchange_token/2, get_exchange_token/1,
-         submit_order/2, set_enabled/1]).
+         submit_order/2, report_fill/2, set_enabled/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {enabled = false, tokens = #{}, orders = #{}, logs = []}).
@@ -24,6 +24,9 @@ get_exchange_token(ExchangeID) ->
 
 submit_order(Req, Order) ->
     gen_server:call(?MODULE, {submit_order, Req, Order}).
+
+report_fill(OrderID, Fill) ->
+    gen_server:call(?MODULE, {report_fill, OrderID, Fill}).
 
 init([]) ->
     {ok, #state{}}.
@@ -47,14 +50,19 @@ handle_call({get_exchange_token, ExchangeID0}, _From, State = #state{tokens = To
 handle_call({submit_order, Req, Order0}, _From, State = #state{enabled = Enabled, orders = Orders, logs = Logs}) ->
     Now = arbiguard_util:now_ms(),
     AccountID = arbiguard_util:to_binary(maps:get(account_id, Order0, maps:get(account_id, Req, <<"live-main">>))),
-    Order = Order0#{submitted_at => Now, mode => live, account_mode => <<"live">>, account_id => AccountID},
+    Order = Order0#{submitted_at => Now, mode => live, account_mode => <<"live">>, account_id => AccountID,
+                    requested_notional => maps:get(target_notional, Order0, maps:get(requested_notional, Order0, 0.0)),
+                    filled_notional => maps:get(filled_notional, Order0, 0.0),
+                    fill_reports => maps:get(fill_reports, Order0, [])},
     ID = maps:get(id, Order, order_id(Order)),
     Result =
         case Enabled of
             true ->
-                %% Real exchange adapters must replace this branch with signed order requests.
-                %% Until then, live orders are accepted into the live-account queue only.
-                Order#{id => ID, status => <<"pending_adapter">>, reason => <<"live_exchange_adapter_not_implemented">>};
+                %% Real exchange adapters should submit signed orders and call report_fill/2
+                %% when exchange execution reports arrive.
+                Order#{id => ID, status => <<"awaiting_fill">>,
+                       adapter_status => <<"pending_adapter">>,
+                       reason => <<"waiting_exchange_fill_report">>};
             false ->
                 Order#{id => ID, status => <<"rejected">>, reason => <<"live_account_disabled">>}
         end,
@@ -67,7 +75,35 @@ handle_call({submit_order, Req, Order0}, _From, State = #state{enabled = Enabled
             req => Req},
     lager:warning("live order request id=~s status=~s reason=~s",
                   [ID, maps:get(status, Result), maps:get(reason, Result)]),
-    {reply, Result, State#state{orders = Orders#{ID => Result}, logs = lists:sublist([Log | Logs], 500)}};
+    {reply, sanitize_order(Result), State#state{orders = Orders#{ID => Result}, logs = lists:sublist([Log | Logs], 500)}};
+handle_call({report_fill, OrderID0, Fill0}, _From, State = #state{orders = Orders, logs = Logs}) ->
+    OrderID = arbiguard_util:to_binary(OrderID0),
+    Now = arbiguard_util:now_ms(),
+    case maps:get(OrderID, Orders, undefined) of
+        undefined ->
+            {reply, #{ok => false, reason => <<"order_not_found">>}, State};
+        Order0 ->
+            Fill = normalize_fill(Fill0),
+            FilledNotional = maps:get(filled_notional, Order0, 0.0) + maps:get(filled_notional, Fill, 0.0),
+            Requested = maps:get(requested_notional, Order0, maps:get(target_notional, Order0, 0.0)),
+            Full = Requested > 0 andalso FilledNotional >= Requested * 0.999,
+            Status = case Full of true -> <<"filled">>; false -> <<"partial_filled">> end,
+            Reports = [Fill#{time => Now} | maps:get(fill_reports, Order0, [])],
+            Order = Order0#{status => Status,
+                            filled_notional => FilledNotional,
+                            remaining_notional => max(0.0, Requested - FilledNotional),
+                            fill_reports => Reports,
+                            updated_at => Now},
+            maybe_notify_owner(Order),
+            Log = #{time => Now,
+                    action => <<"live_fill_report">>,
+                    id => OrderID,
+                    status => Status,
+                    filled_notional => FilledNotional,
+                    remaining_notional => maps:get(remaining_notional, Order, 0.0)},
+            {reply, sanitize_order(Order), State#state{orders = Orders#{OrderID => Order},
+                                                       logs = lists:sublist([Log | Logs], 500)}}
+    end;
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -90,6 +126,19 @@ truthy(true) -> true;
 truthy(<<"true">>) -> true;
 truthy(1) -> true;
 truthy(_) -> false.
+
+normalize_fill(Fill0) ->
+    Fill = case is_map(Fill0) of true -> Fill0; false -> #{} end,
+    Fill#{filled_notional => arbiguard_util:to_float(maps:get(filled_notional, Fill, maps:get(notional, Fill, 0.0)), 0.0)}.
+
+maybe_notify_owner(Order) ->
+    case maps:get(owner_pid, Order, undefined) of
+        Pid when is_pid(Pid) -> Pid ! {live_order_update, sanitize_order(Order)};
+        _ -> ok
+    end.
+
+sanitize_order(Order) ->
+    maps:without([owner_pid, req, opportunity, position], Order).
 
 order_id(Order) ->
     Symbol = maps:get(symbol, Order, <<"UNKNOWN">>),
