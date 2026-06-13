@@ -225,7 +225,7 @@ open_position(Paper, Req, Key, Op, Notional) ->
                     close_fee => 0.0,
                     funding_pnl => 0.0,
                     price_pnl => 0.0,
-                    unrealized_pnl => -OpenFee,
+                    unrealized_pnl => 0.0,
                     expected_net_profit => maps:get(estimated_net_profit, Op, 0),
                     expected_net_return => maps:get(expected_net_return, Op, 0),
                     long_funding_rate => maps:get(long_funding_rate, Op, 0),
@@ -385,10 +385,35 @@ exchange_equity(Paper) ->
     Bal = maps:get(exchange_balances, Paper, #{}),
     Positions = maps:get(positions, Paper, #{}),
     maps:map(fun(Ex, Value) ->
-        Value + lists:sum([maps:get(long_margin, P, 0) + maps:get(short_margin, P, 0) + maps:get(unrealized_pnl, P, 0)
-                           || {_K, P} <- maps:to_list(Positions),
-                              maps:get(long_exchange, P, <<"">>) =:= Ex orelse maps:get(short_exchange, P, <<"">>) =:= Ex])
+        Value + lists:sum([position_exchange_equity_delta(Ex, P) || {_K, P} <- maps:to_list(Positions)])
     end, Bal).
+
+position_exchange_equity_delta(Ex, P) ->
+    LongDelta = case maps:get(long_exchange, P, <<"">>) =:= Ex of
+        true -> maps:get(long_margin, P, 0) + long_leg_pnl(P);
+        false -> 0.0
+    end,
+    ShortDelta = case maps:get(short_exchange, P, <<"">>) =:= Ex of
+        true -> maps:get(short_margin, P, 0) + short_leg_pnl(P);
+        false -> 0.0
+    end,
+    LongDelta + ShortDelta.
+
+long_leg_pnl(P) ->
+    LongPrice = maps:get(long_current_price, P, maps:get(long_entry_price, P, 0)),
+    LongEntry = maps:get(long_entry_price, P, 0),
+    LongQty = maps:get(long_qty, P, 0),
+    FundingPNL = maps:get(funding_pnl, P, 0) / 2,
+    CloseFee = maps:get(close_fee, P, 0) / 2,
+    (LongPrice - LongEntry) * LongQty + FundingPNL - CloseFee.
+
+short_leg_pnl(P) ->
+    ShortPrice = maps:get(short_current_price, P, maps:get(short_entry_price, P, 0)),
+    ShortEntry = maps:get(short_entry_price, P, 0),
+    ShortQty = maps:get(short_qty, P, 0),
+    FundingPNL = maps:get(funding_pnl, P, 0) / 2,
+    CloseFee = maps:get(close_fee, P, 0) / 2,
+    (ShortEntry - ShortPrice) * ShortQty + FundingPNL - CloseFee.
 
 position_margin_total(Positions) ->
     lists:sum([maps:get(long_margin, P, 0) + maps:get(short_margin, P, 0) || {_K, P} <- maps:to_list(Positions)]).

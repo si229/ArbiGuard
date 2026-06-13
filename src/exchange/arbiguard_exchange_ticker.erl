@@ -321,32 +321,32 @@ ws_endpoint_info(State) ->
     end.
 
 subscribe_payload(<<"okx">>, Symbol) ->
-    arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{channel => <<"tickers">>, instId => okx_symbol(Symbol)}]});
+    arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{channel => <<"bbo-tbt">>, instId => okx_symbol(Symbol)}]});
 subscribe_payload(<<"binance">>, Symbol) ->
     Stream = <<(string:lowercase(norm_symbol(Symbol)))/binary, "@bookTicker">>,
     arbiguard_json:encode(#{method => <<"SUBSCRIBE">>, params => [Stream], id => erlang:unique_integer([positive])});
 subscribe_payload(<<"gate">>, Symbol) ->
-    arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.tickers">>,
+    arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.book_ticker">>,
                             event => <<"subscribe">>, payload => [gate_symbol(Symbol)]});
 subscribe_payload(<<"htx">>, Symbol) ->
     Contract = htx_symbol(Symbol),
-    arbiguard_json:encode(#{sub => <<"market.", Contract/binary, ".depth.step0">>, id => Symbol});
+    arbiguard_json:encode(#{sub => <<"market.", Contract/binary, ".bbo">>, id => Symbol});
 subscribe_payload(<<"weex">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
 subscribe_payload(_, _Symbol) ->
     undefined.
 
 unsubscribe_payload(<<"okx">>, Symbol) ->
-    arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{channel => <<"tickers">>, instId => okx_symbol(Symbol)}]});
+    arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{channel => <<"bbo-tbt">>, instId => okx_symbol(Symbol)}]});
 unsubscribe_payload(<<"binance">>, Symbol) ->
     Stream = <<(string:lowercase(norm_symbol(Symbol)))/binary, "@bookTicker">>,
     arbiguard_json:encode(#{method => <<"UNSUBSCRIBE">>, params => [Stream], id => erlang:unique_integer([positive])});
 unsubscribe_payload(<<"gate">>, Symbol) ->
-    arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.tickers">>,
+    arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.book_ticker">>,
                             event => <<"unsubscribe">>, payload => [gate_symbol(Symbol)]});
 unsubscribe_payload(<<"htx">>, Symbol) ->
     Contract = htx_symbol(Symbol),
-    arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".depth.step0">>, id => Symbol});
+    arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".bbo">>, id => Symbol});
 unsubscribe_payload(<<"weex">>, Symbol) ->
     arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
 unsubscribe_payload(_, _Symbol) ->
@@ -403,23 +403,23 @@ maybe_write_ticker(Msg, State = #state{id = <<"okx">> = ID}) ->
     Data = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
     [write_ticker(ID,
                   undo_okx_symbol(map_get_any([instId, <<"instId">>], Row, <<"">>)),
-                  arbiguard_util:to_float(map_get_any([bidPx, <<"bidPx">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([askPx, <<"askPx">>], Row, 0), 0),
+                  best_bid(Row, [bidPx, <<"bidPx">>]),
+                  best_ask(Row, [askPx, <<"askPx">>]),
                   arbiguard_util:to_float(map_get_any([last, <<"last">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([markPx, mark_price, <<"markPx">>, <<"mark_price">>], Row, 0), 0),
-                  <<"ws_ticker">>,
+                  <<"ws_bbo_tbt">>,
                   State)
      || Row <- Data],
     ok;
 maybe_write_ticker(Msg, State = #state{id = <<"gate">> = ID}) ->
     Rows = rows_from_value(map_get_any([result, <<"result">>], Msg, [])),
     [write_ticker(ID,
-                  undo_gate_symbol(map_get_any([contract, <<"contract">>], Row, <<"">>)),
-                  arbiguard_util:to_float(map_get_any([highest_bid, bid1, <<"highest_bid">>, <<"bid1">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([lowest_ask, ask1, <<"lowest_ask">>, <<"ask1">>], Row, 0), 0),
+                  undo_gate_symbol(map_get_any([contract, s, symbol, <<"contract">>, <<"s">>, <<"symbol">>], Row, <<"">>)),
+                  best_bid(Row, [b, bid, highest_bid, bid1, <<"b">>, <<"bid">>, <<"highest_bid">>, <<"bid1">>]),
+                  best_ask(Row, [a, ask, lowest_ask, ask1, <<"a">>, <<"ask">>, <<"lowest_ask">>, <<"ask1">>]),
                   arbiguard_util:to_float(map_get_any([last, <<"last">>], Row, 0), 0),
                   arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Row, 0), 0),
-                  <<"ws_ticker">>,
+                  <<"ws_book_ticker">>,
                   State)
      || Row <- Rows],
     ok;
@@ -431,7 +431,7 @@ maybe_write_ticker(Msg, State = #state{id = <<"htx">> = ID}) ->
     Ask = side_price(map_get_any([ask, asks, <<"ask">>, <<"asks">>], Tick, [])),
     Last = arbiguard_util:to_float(map_get_any([close, <<"close">>], Tick, 0), 0),
     Mark = arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Tick, 0), 0),
-    case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, Last, Mark, <<"ws_ticker">>, State) end;
+    case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, Last, Mark, <<"ws_bbo">>, State) end;
 maybe_write_ticker(Msg, State = #state{id = <<"weex">> = ID}) ->
     Rows = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
     [write_ticker(ID,
@@ -512,6 +512,18 @@ htx_symbol_from_channel(Ch0) ->
         [<<"market">>, Contract, <<"bbo">>] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
         [<<"market">>, Contract, <<"detail">>] -> binary:replace(Contract, <<"-">>, <<>>, [global]);
         _ -> <<"">>
+    end.
+
+best_bid(Row, FallbackKeys) ->
+    case side_price(map_get_any([bids, bid, <<"bids">>, <<"bid">>], Row, [])) of
+        0 -> arbiguard_util:to_float(map_get_any(FallbackKeys, Row, 0), 0);
+        Bid -> Bid
+    end.
+
+best_ask(Row, FallbackKeys) ->
+    case side_price(map_get_any([asks, ask, <<"asks">>, <<"ask">>], Row, [])) of
+        0 -> arbiguard_util:to_float(map_get_any(FallbackKeys, Row, 0), 0);
+        Ask -> Ask
     end.
 
 side_price([[Price | _] | _]) ->
