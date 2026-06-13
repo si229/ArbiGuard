@@ -477,6 +477,8 @@ has_exchange_ws_reason(Reasons) ->
     lists:any(fun exchange_ws_reason/1, Reasons).
 
 exchange_ws_reason(symbol_watcher) -> true;
+exchange_ws_reason(open_execution_order) -> true;
+exchange_ws_reason(close_execution_order) -> true;
 exchange_ws_reason(_) -> false.
 
 map_get_any([], _Map, Default) ->

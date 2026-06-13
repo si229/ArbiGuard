@@ -238,8 +238,13 @@ maybe_submit_from_ticker_1(Order, Cache) ->
                         maps:get(short_price, Op, 0), maps:get(long_mark_price, Op, 0),
                         maps:get(short_mark_price, Op, 0), maps:get(suggested_notional, Op, 0)]),
             dispatch_order(Req, public_order(apply_remaining_order(Order)), Op);
+        {wait, WaitInfo} ->
+            Order#{wait_reason => maps:get(reason, WaitInfo, <<"waiting_ws_ticker">>),
+                   wait_detail => WaitInfo,
+                   wait_checked_at => arbiguard_util:now_ms()};
         wait ->
-            Order
+            Order#{wait_reason => <<"waiting_ws_ticker">>,
+                   wait_checked_at => arbiguard_util:now_ms()}
     end.
 
 apply_remaining_order(Order) ->
@@ -282,11 +287,49 @@ enrich_opportunity_from_cache(Op, Req, Cache) ->
                                liquidation_price_basis => <<"mark_price">>,
                                execution_price_updated_at => min(maps:get(updated_at, LongRow, 0), maps:get(updated_at, ShortRow, 0))},
                     require_profitable(refresh_expected_profit(Op1, Req), Req);
-                false -> wait
+                false ->
+                    {wait, ticker_wait_info(Op, LongRow, ShortRow)}
             end;
-        _ ->
-            wait
+        {LongRow, ShortRow} ->
+            {wait, ticker_wait_info(Op, LongRow, ShortRow)}
     end.
+
+ticker_wait_info(Op, LongRow, ShortRow) ->
+    LongReady = is_map(LongRow),
+    ShortReady = is_map(ShortRow),
+    LongAsk = price_or_zero(LongRow, ask),
+    ShortBid = price_or_zero(ShortRow, bid),
+    Reason = case {LongReady, ShortReady, LongAsk > 0, ShortBid > 0} of
+        {false, false, _, _} -> <<"missing_both_tickers">>;
+        {false, _, _, _} -> <<"missing_long_ticker">>;
+        {_, false, _, _} -> <<"missing_short_ticker">>;
+        {_, _, false, false} -> <<"missing_long_ask_and_short_bid">>;
+        {_, _, false, _} -> <<"missing_long_ask">>;
+        {_, _, _, false} -> <<"missing_short_bid">>;
+        _ -> <<"waiting_ws_ticker">>
+    end,
+    #{reason => Reason,
+      symbol => maps:get(symbol, Op, <<"">>),
+      long_exchange => maps:get(long_exchange, Op, <<"">>),
+      short_exchange => maps:get(short_exchange, Op, <<"">>),
+      long_ticker_ready => LongReady,
+      short_ticker_ready => ShortReady,
+      long_bid => price_or_zero(LongRow, bid),
+      long_ask => LongAsk,
+      long_updated_at => int_or_zero(LongRow, updated_at),
+      short_bid => ShortBid,
+      short_ask => price_or_zero(ShortRow, ask),
+      short_updated_at => int_or_zero(ShortRow, updated_at)}.
+
+price_or_zero(Row, Key) when is_map(Row) ->
+    arbiguard_util:to_float(maps:get(Key, Row, 0), 0);
+price_or_zero(_Row, _Key) ->
+    0.0.
+
+int_or_zero(Row, Key) when is_map(Row) ->
+    arbiguard_util:to_int(maps:get(Key, Row, 0), 0);
+int_or_zero(_Row, _Key) ->
+    0.
 
 ticker_from_symbol_cache_or_ets(Exchange, Symbol, SymbolRows) ->
     case maps:get(Exchange, SymbolRows, undefined) of
@@ -322,7 +365,14 @@ require_profitable(Op, Req) ->
         false ->
             lager:info("open executor wait profit_below_threshold symbol=~s profit=~p min=~p",
                        [maps:get(symbol, Op, <<"">>), maps:get(estimated_net_profit, Op, 0.0), MinProfit]),
-            wait
+            {wait, #{reason => <<"profit_below_threshold_after_ws_price">>,
+                     symbol => maps:get(symbol, Op, <<"">>),
+                     estimated_net_profit => maps:get(estimated_net_profit, Op, 0.0),
+                     min_execution_profit_usdt => MinProfit,
+                     long_price => maps:get(long_price, Op, 0.0),
+                     short_price => maps:get(short_price, Op, 0.0),
+                     price_gap_return => maps:get(price_gap_return, Op, 0.0),
+                     funding_edge_return => maps:get(funding_edge_return, Op, 0.0)}}
     end.
 
 public_order(Order) ->
