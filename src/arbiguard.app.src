@@ -5,6 +5,7 @@
                 arbiguard_live_account,
                 arbiguard_open_executor,
                 arbiguard_close_executor,
+                arbiguard_symbol_watcher,
                 arbiguard_scanner,
                 arbiguard_http]},
   {mod, {arbiguard_app, []}},

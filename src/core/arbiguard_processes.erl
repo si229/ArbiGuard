@@ -6,6 +6,7 @@ snapshot() ->
     Exchanges = arbiguard_calc:default_exchanges(),
     #{ets => ets_info(),
       scanner => safe_call(fun arbiguard_scanner:snapshot/0),
+      symbol_watcher => safe_call(fun arbiguard_symbol_watcher:snapshot/0),
       executor => safe_call(fun arbiguard_executor:snapshot/0),
       account => account_brief(),
       live_account => safe_call(fun arbiguard_live_account:snapshot/0),

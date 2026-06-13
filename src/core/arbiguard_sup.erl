@@ -40,6 +40,12 @@ init([]) ->
           modules => [arbiguard_close_executor]}
     ],
     TailChildren = [
+        #{id => arbiguard_symbol_watcher,
+          start => {arbiguard_symbol_watcher, start_link, [Exchanges]},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [arbiguard_symbol_watcher]},
         #{id => arbiguard_scanner,
           start => {arbiguard_scanner, start_link, []},
           restart => permanent,
