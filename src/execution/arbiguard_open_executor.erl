@@ -218,9 +218,6 @@ require_profitable(Op, Req) ->
 public_order(Order) ->
     maps:without([req, opportunity], Order).
 
-order_key(Op) ->
-    order_key(#{}, Op).
-
 order_key(Req, Op) ->
     Account = account_scope(Req),
     <<(maps:get(id, Account))/binary, "|", (maps:get(mode, Account))/binary, "|",

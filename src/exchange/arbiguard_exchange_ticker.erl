@@ -63,29 +63,33 @@ handle_call({set_ws_endpoint, Host0, Port0, Path0}, _From, State) ->
 handle_call({subscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
     OldReasons = maps:get(Symbol, Subs, []),
-    AlreadySubscribed = OldReasons =/= [],
+    AlreadyWsSubscribed = has_exchange_ws_reason(OldReasons),
     NewReasons = add_reason(Reason, OldReasons),
-    lager:info("ticker subscribe exchange=~s symbol=~s reason=~p already=~p reasons=~p",
-               [State#state.id, Symbol, Reason, AlreadySubscribed, NewReasons]),
+    ShouldWsSubscribe = has_exchange_ws_reason(NewReasons) andalso not AlreadyWsSubscribed,
+    lager:info("ticker local subscribe exchange=~s symbol=~s reason=~p ws_subscribe=~p reasons=~p",
+               [State#state.id, Symbol, Reason, ShouldWsSubscribe, NewReasons]),
     State1 = State#state{subscriptions = Subs#{Symbol => NewReasons}},
-    NewState = case AlreadySubscribed of
-        true -> State1;
-        false -> maybe_ws_subscribe(State1, Symbol)
+    NewState = case ShouldWsSubscribe of
+        true -> maybe_ws_subscribe(State1, Symbol);
+        false -> State1
     end,
     {reply, ok, NewState};
 handle_call({unsubscribe, Symbol0, Reason}, _From, State = #state{subscriptions = Subs}) ->
     Symbol = norm_symbol(Symbol0),
     OldReasons = maps:get(Symbol, Subs, []),
     NewReasons = remove_reason(Reason, OldReasons),
-    lager:info("ticker unsubscribe exchange=~s symbol=~s reason=~p remaining=~p",
-               [State#state.id, Symbol, Reason, NewReasons]),
-    case NewReasons of
-        [] ->
-            NewState = maybe_ws_unsubscribe(State, Symbol),
-            {reply, ok, NewState#state{subscriptions = maps:remove(Symbol, Subs)}};
-        _ ->
-            {reply, ok, State#state{subscriptions = Subs#{Symbol => NewReasons}}}
-    end;
+    ShouldWsUnsubscribe = has_exchange_ws_reason(OldReasons) andalso not has_exchange_ws_reason(NewReasons),
+    lager:info("ticker local unsubscribe exchange=~s symbol=~s reason=~p ws_unsubscribe=~p remaining=~p",
+               [State#state.id, Symbol, Reason, ShouldWsUnsubscribe, NewReasons]),
+    State1 = case ShouldWsUnsubscribe of
+        true -> maybe_ws_unsubscribe(State, Symbol);
+        false -> State
+    end,
+    State2 = case NewReasons of
+        [] -> State1#state{subscriptions = maps:remove(Symbol, Subs)};
+        _ -> State1#state{subscriptions = Subs#{Symbol => NewReasons}}
+    end,
+    {reply, ok, State2};
 handle_call(snapshot, _From, State = #state{subscriptions = Subs}) ->
     {reply, #{exchange => State#state.id,
               ws_enabled => State#state.ws_enabled,
@@ -187,7 +191,13 @@ close_ws(State = #state{ws_conn = ConnPid}) ->
 replay_subscriptions(State = #state{id = <<"binance">>}) ->
     State;
 replay_subscriptions(State = #state{subscriptions = Subs}) ->
-    lists:foldl(fun(Symbol, Acc) -> maybe_ws_subscribe(Acc, Symbol) end, State, maps:keys(Subs)).
+    lists:foldl(fun
+        (Symbol, Acc) ->
+            case has_exchange_ws_reason(maps:get(Symbol, Subs, [])) of
+                true -> maybe_ws_subscribe(Acc, Symbol);
+                false -> Acc
+            end
+    end, State, maps:keys(Subs)).
 
 maybe_ws_subscribe(State = #state{ws_connected = true, ws_conn = ConnPid, ws_stream = StreamRef}, Symbol) ->
     case subscribe_payload(State#state.id, Symbol) of
@@ -403,6 +413,12 @@ add_reason(Reason, Reasons) ->
 
 remove_reason(Reason, Reasons) ->
     [R || R <- Reasons, R =/= Reason].
+
+has_exchange_ws_reason(Reasons) ->
+    lists:any(fun exchange_ws_reason/1, Reasons).
+
+exchange_ws_reason(symbol_watcher) -> true;
+exchange_ws_reason(_) -> false.
 
 map_get_any([], _Map, Default) ->
     Default;

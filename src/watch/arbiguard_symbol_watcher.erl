@@ -101,7 +101,7 @@ maybe_subscribe_all(true, ID, Added) ->
     ok.
 
 maybe_unsubscribe_all(ID, Removed) ->
-    [catch arbiguard_exchange_ticker:unsubscribe(ID, Symbol, symbol_removed_or_not_tradable) || Symbol <- Removed],
+    [catch arbiguard_exchange_ticker:unsubscribe(ID, Symbol, symbol_watcher) || Symbol <- Removed],
     ok.
 
 state_snapshot(State = #state{symbols = Symbols}) ->
