@@ -8,7 +8,7 @@
                 arbiguard_scanner,
                 arbiguard_http]},
   {mod, {arbiguard_app, []}},
-  {applications, [kernel, stdlib, inets, ssl, crypto, lager]},
+  {applications, [kernel, stdlib, inets, ssl, crypto, lager, gun]},
   {env, [{http_port, 8771},
          {paper_capital_usdt, 10000.0}]},
   {modules, []}]}.

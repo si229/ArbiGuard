@@ -35,11 +35,11 @@ handle_call(snapshot, _From, State = #state{enabled = Enabled, tokens = Tokens, 
               logs => Logs}, State};
 handle_call({set_enabled, Enabled0}, _From, State) ->
     Enabled = truthy(Enabled0),
-    lager:log(warning, self(), "live account enabled=~p", [Enabled]),
+    lager:warning("live account enabled=~p", [Enabled]),
     {reply, #{enabled => Enabled}, State#state{enabled = Enabled}};
 handle_call({set_exchange_token, ExchangeID0, TokenConfig}, _From, State = #state{tokens = Tokens}) ->
     ExchangeID = norm_exchange(ExchangeID0),
-    lager:log(info, self(), "live token configured exchange=~s", [ExchangeID]),
+    lager:info("live token configured exchange=~s", [ExchangeID]),
     {reply, ok, State#state{tokens = Tokens#{ExchangeID => TokenConfig}}};
 handle_call({get_exchange_token, ExchangeID0}, _From, State = #state{tokens = Tokens}) ->
     ExchangeID = norm_exchange(ExchangeID0),
@@ -63,8 +63,8 @@ handle_call({submit_order, Req, Order0}, _From, State = #state{enabled = Enabled
             status => maps:get(status, Result),
             reason => maps:get(reason, Result),
             req => Req},
-    lager:log(warning, self(), "live order request id=~s status=~s reason=~s",
-              [ID, maps:get(status, Result), maps:get(reason, Result)]),
+    lager:warning("live order request id=~s status=~s reason=~s",
+                  [ID, maps:get(status, Result), maps:get(reason, Result)]),
     {reply, Result, State#state{orders = Orders#{ID => Result}, logs = lists:sublist([Log | Logs], 500)}};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
