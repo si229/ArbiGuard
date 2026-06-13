@@ -26,12 +26,18 @@ init([]) ->
           shutdown => 5000,
           type => worker,
           modules => [arbiguard_live_account]},
-        #{id => arbiguard_executor,
-          start => {arbiguard_executor, start_link, []},
+        #{id => arbiguard_open_executor,
+          start => {arbiguard_open_executor, start_link, []},
           restart => permanent,
           shutdown => 5000,
           type => worker,
-          modules => [arbiguard_executor]}
+          modules => [arbiguard_open_executor]},
+        #{id => arbiguard_close_executor,
+          start => {arbiguard_close_executor, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [arbiguard_close_executor]}
     ],
     TailChildren = [
         #{id => arbiguard_scanner,
