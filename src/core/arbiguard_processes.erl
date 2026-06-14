@@ -25,7 +25,8 @@ exchange_snapshot(Exchange) ->
     ID = maps:get(id, Exchange),
     #{exchange => ID,
       ticker => safe_call(fun() -> arbiguard_exchange_ticker:snapshot(ID) end),
-      funding => safe_call(fun() -> arbiguard_exchange_funding:snapshot(ID) end)}.
+      funding => safe_call(fun() -> arbiguard_exchange_funding:snapshot(ID) end),
+      private_ws => safe_call(fun() -> arbiguard_private_ws:snapshot(ID) end)}.
 
 account_brief() ->
     Snapshot = safe_call(fun arbiguard_state:snapshot/0),

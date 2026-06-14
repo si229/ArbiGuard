@@ -70,7 +70,7 @@ enabled_exchanges(Exchanges) ->
     [E || E <- Exchanges, maps:get(enabled, E, true) =:= true].
 
 exchange_child_specs(Exchange) ->
-    [ticker_child(Exchange), funding_child(Exchange)].
+    [ticker_child(Exchange), funding_child(Exchange), private_ws_child(Exchange)].
 
 ticker_child(Exchange) ->
     #{id => ticker_child_id(maps:get(id, Exchange)),
@@ -88,8 +88,19 @@ funding_child(Exchange) ->
       type => worker,
       modules => [arbiguard_exchange_funding]}.
 
+private_ws_child(Exchange) ->
+    #{id => private_ws_child_id(maps:get(id, Exchange)),
+      start => {arbiguard_private_ws, start_link, [Exchange]},
+      restart => permanent,
+      shutdown => 5000,
+      type => worker,
+      modules => [arbiguard_private_ws]}.
+
 ticker_child_id(ID) ->
     list_to_atom("ticker_" ++ binary_to_list(ID)).
 
 funding_child_id(ID) ->
     list_to_atom("funding_" ++ binary_to_list(ID)).
+
+private_ws_child_id(ID) ->
+    list_to_atom("private_ws_" ++ binary_to_list(ID)).

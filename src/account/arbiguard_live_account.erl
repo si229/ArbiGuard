@@ -3,10 +3,12 @@
 
 -export([start_link/0, snapshot/0, set_exchange_token/2, get_exchange_token/1,
          submit_order/2, report_fill/2, report_funding_settlement/2, set_enabled/1,
-         debug_order/1, test_order/1]).
+         debug_order/1, test_order/1, report_balance/2, report_position/2,
+         report_order_event/2, report_liquidation/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {enabled = false, tokens = #{}, orders = #{}, logs = [],
+                balances = #{}, positions = #{}, liquidations = [],
                 debug_balances = #{}, debug_positions = #{}}).
 
 start_link() ->
@@ -30,6 +32,18 @@ submit_order(Req, Order) ->
 report_fill(OrderID, Fill) ->
     gen_server:call(?MODULE, {report_fill, OrderID, Fill}).
 
+report_order_event(ExchangeID, Event) ->
+    gen_server:call(?MODULE, {report_order_event, ExchangeID, Event}).
+
+report_balance(ExchangeID, Balance) ->
+    gen_server:call(?MODULE, {report_balance, ExchangeID, Balance}).
+
+report_position(ExchangeID, Position) ->
+    gen_server:call(?MODULE, {report_position, ExchangeID, Position}).
+
+report_liquidation(ExchangeID, Event) ->
+    gen_server:call(?MODULE, {report_liquidation, ExchangeID, Event}).
+
 report_funding_settlement(PositionID, Settlement) ->
     gen_server:call(?MODULE, {report_funding_settlement, PositionID, Settlement}).
 
@@ -43,12 +57,16 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call(snapshot, _From, State = #state{enabled = Enabled, tokens = Tokens, orders = Orders, logs = Logs,
-                                           debug_balances = Balances, debug_positions = Positions}) ->
+                                           balances = LiveBalances, positions = LivePositions, liquidations = Liquidations,
+                                           debug_balances = DebugBalances, debug_positions = DebugPositions}) ->
     {reply, #{enabled => Enabled,
               token_exchanges => maps:keys(Tokens),
               orders => maps:values(Orders),
-              debug_balances => Balances,
-              debug_positions => maps:values(Positions),
+              balances => LiveBalances,
+              positions => maps:values(LivePositions),
+              liquidations => Liquidations,
+              debug_balances => DebugBalances,
+              debug_positions => maps:values(DebugPositions),
               logs => Logs}, State};
 handle_call({set_enabled, Enabled0}, _From, State) ->
     Enabled = truthy(Enabled0),
@@ -118,6 +136,73 @@ handle_call({report_fill, OrderID0, Fill0}, _From, State = #state{orders = Order
             {reply, sanitize_order(Order), State#state{orders = Orders#{OrderID => Order},
                                                        logs = lists:sublist([Log | Logs], 500)}}
     end;
+handle_call({report_order_event, ExchangeID0, Event0}, _From, State = #state{orders = Orders, logs = Logs}) ->
+    ExchangeID = norm_exchange(ExchangeID0),
+    Event = normalize_order_event(ExchangeID, Event0),
+    OrderID = maps:get(order_id, Event, <<"">>),
+    Now = arbiguard_util:now_ms(),
+    State1 = case OrderID of
+        <<"">> ->
+            State;
+        _ ->
+            case maps:get(OrderID, Orders, undefined) of
+                undefined ->
+                    State;
+                Order0 ->
+                    FilledNotional0 = maps:get(filled_notional, Order0, 0.0),
+                    DeltaFilled = maps:get(delta_filled_notional, Event, 0.0),
+                    FilledNotional = case DeltaFilled > 0 of
+                        true -> FilledNotional0 + DeltaFilled;
+                        false -> max(FilledNotional0, maps:get(filled_notional, Event, FilledNotional0))
+                    end,
+                    Requested = maps:get(requested_notional, Order0, maps:get(target_notional, Order0, 0.0)),
+                    Status = normalize_order_status(maps:get(status, Event, <<"">>), Requested, FilledNotional),
+                    Order = Order0#{status => Status,
+                                    exchange_status => maps:get(status, Event, <<"">>),
+                                    filled_notional => FilledNotional,
+                                    remaining_notional => max(0.0, Requested - FilledNotional),
+                                    last_exchange_event => Event,
+                                    updated_at => Now},
+                    maybe_notify_owner(Order),
+                    State#state{orders = Orders#{OrderID => Order}}
+            end
+    end,
+    Log = #{time => Now,
+            action => <<"live_order_event">>,
+            exchange => ExchangeID,
+            id => OrderID,
+            status => maps:get(status, Event, <<"">>),
+            filled_notional => maps:get(filled_notional, Event, 0.0),
+            event => maps:without([raw], Event)},
+    {reply, #{ok => true, event => Event}, State1#state{logs = lists:sublist([Log | Logs], 500)}};
+handle_call({report_balance, ExchangeID0, Balance0}, _From, State = #state{balances = Balances, logs = Logs}) ->
+    ExchangeID = norm_exchange(ExchangeID0),
+    Now = arbiguard_util:now_ms(),
+    Balance = (normalize_balance(ExchangeID, Balance0))#{updated_at => Now},
+    Log = #{time => Now, action => <<"live_balance_update">>, exchange => ExchangeID,
+            balance => maps:without([raw], Balance)},
+    {reply, #{ok => true, balance => Balance},
+     State#state{balances = Balances#{ExchangeID => Balance}, logs = lists:sublist([Log | Logs], 500)}};
+handle_call({report_position, ExchangeID0, Position0}, _From, State = #state{positions = Positions, logs = Logs}) ->
+    ExchangeID = norm_exchange(ExchangeID0),
+    Now = arbiguard_util:now_ms(),
+    Position = (normalize_position(ExchangeID, Position0))#{updated_at => Now},
+    Key = position_key(Position),
+    Log = #{time => Now, action => <<"live_position_update">>, exchange => ExchangeID,
+            symbol => maps:get(symbol, Position, <<"">>), side => maps:get(side, Position, <<"">>),
+            position => maps:without([raw], Position)},
+    {reply, #{ok => true, position => Position},
+     State#state{positions = Positions#{Key => Position}, logs = lists:sublist([Log | Logs], 500)}};
+handle_call({report_liquidation, ExchangeID0, Event0}, _From, State = #state{liquidations = Liquidations, logs = Logs}) ->
+    ExchangeID = norm_exchange(ExchangeID0),
+    Now = arbiguard_util:now_ms(),
+    Event = (normalize_liquidation(ExchangeID, Event0))#{time => Now},
+    notify_liquidation(Event),
+    Log = #{time => Now, action => <<"live_liquidation_event">>, exchange => ExchangeID,
+            symbol => maps:get(symbol, Event, <<"">>), event => maps:without([raw], Event)},
+    {reply, #{ok => true, event => Event},
+     State#state{liquidations = lists:sublist([Event | Liquidations], 100),
+                 logs = lists:sublist([Log | Logs], 500)}};
 handle_call({report_funding_settlement, PositionID0, Settlement0}, _From, State = #state{logs = Logs}) ->
     PositionID = arbiguard_util:to_binary(PositionID0),
     Now = arbiguard_util:now_ms(),
@@ -174,6 +259,75 @@ truthy(_) -> false.
 normalize_fill(Fill0) ->
     Fill = case is_map(Fill0) of true -> Fill0; false -> #{} end,
     Fill#{filled_notional => arbiguard_util:to_float(maps:get(filled_notional, Fill, maps:get(notional, Fill, 0.0)), 0.0)}.
+
+normalize_order_event(ExchangeID, Event0) ->
+    Event = case is_map(Event0) of true -> Event0; false -> #{} end,
+    Event#{
+        exchange => ExchangeID,
+        order_id => arbiguard_util:to_binary(maps:get(order_id, Event, maps:get(id, Event, <<"">>))),
+        client_order_id => arbiguard_util:to_binary(maps:get(client_order_id, Event, maps:get(client_oid, Event, <<"">>))),
+        symbol => string:uppercase(arbiguard_util:to_binary(maps:get(symbol, Event, <<"">>))),
+        side => string:lowercase(arbiguard_util:to_binary(maps:get(side, Event, <<"">>))),
+        status => string:lowercase(arbiguard_util:to_binary(maps:get(status, Event, <<"">>))),
+        filled_qty => arbiguard_util:to_float(maps:get(filled_qty, Event, maps:get(fill_qty, Event, 0.0)), 0.0),
+        filled_price => arbiguard_util:to_float(maps:get(filled_price, Event, maps:get(price, Event, 0.0)), 0.0),
+        filled_notional => arbiguard_util:to_float(maps:get(filled_notional, Event, maps:get(notional, Event, 0.0)), 0.0),
+        delta_filled_notional => arbiguard_util:to_float(maps:get(delta_filled_notional, Event, 0.0), 0.0),
+        fee => arbiguard_util:to_float(maps:get(fee, Event, 0.0), 0.0)
+    }.
+
+normalize_order_status(<<"filled">>, _Requested, _Filled) -> <<"filled">>;
+normalize_order_status(<<"closed">>, _Requested, _Filled) -> <<"filled">>;
+normalize_order_status(<<"canceled">>, _Requested, _Filled) -> <<"cancelled">>;
+normalize_order_status(<<"cancelled">>, _Requested, _Filled) -> <<"cancelled">>;
+normalize_order_status(<<"partially_filled">>, _Requested, _Filled) -> <<"partial_filled">>;
+normalize_order_status(_Status, Requested, Filled) when Requested > 0, Filled >= Requested * 0.999 -> <<"filled">>;
+normalize_order_status(_Status, _Requested, Filled) when Filled > 0 -> <<"partial_filled">>;
+normalize_order_status(Status, _Requested, _Filled) when Status =/= <<"">> -> Status;
+normalize_order_status(_Status, _Requested, _Filled) -> <<"exchange_update">>.
+
+normalize_balance(ExchangeID, Balance0) ->
+    Balance = case is_map(Balance0) of true -> Balance0; false -> #{} end,
+    #{exchange => ExchangeID,
+      asset => string:uppercase(arbiguard_util:to_binary(maps:get(asset, Balance, <<"USDT">>))),
+      wallet_balance => arbiguard_util:to_float(maps:get(wallet_balance, Balance, maps:get(balance, Balance, 0.0)), 0.0),
+      available_balance => arbiguard_util:to_float(maps:get(available_balance, Balance, maps:get(available, Balance, 0.0)), 0.0),
+      margin_balance => arbiguard_util:to_float(maps:get(margin_balance, Balance, maps:get(equity, Balance, 0.0)), 0.0),
+      unrealized_pnl => arbiguard_util:to_float(maps:get(unrealized_pnl, Balance, 0.0), 0.0),
+      raw => Balance}.
+
+normalize_position(ExchangeID, Position0) ->
+    Position = case is_map(Position0) of true -> Position0; false -> #{} end,
+    #{exchange => ExchangeID,
+      symbol => string:uppercase(arbiguard_util:to_binary(maps:get(symbol, Position, <<"">>))),
+      side => string:lowercase(arbiguard_util:to_binary(maps:get(side, Position, <<"">>))),
+      qty => arbiguard_util:to_float(maps:get(qty, Position, maps:get(position_amt, Position, 0.0)), 0.0),
+      entry_price => arbiguard_util:to_float(maps:get(entry_price, Position, 0.0), 0.0),
+      mark_price => arbiguard_util:to_float(maps:get(mark_price, Position, 0.0), 0.0),
+      liquidation_price => arbiguard_util:to_float(maps:get(liquidation_price, Position, 0.0), 0.0),
+      unrealized_pnl => arbiguard_util:to_float(maps:get(unrealized_pnl, Position, 0.0), 0.0),
+      margin => arbiguard_util:to_float(maps:get(margin, Position, 0.0), 0.0),
+      raw => Position}.
+
+normalize_liquidation(ExchangeID, Event0) ->
+    Event = case is_map(Event0) of true -> Event0; false -> #{} end,
+    #{exchange => ExchangeID,
+      symbol => string:uppercase(arbiguard_util:to_binary(maps:get(symbol, Event, <<"">>))),
+      side => string:lowercase(arbiguard_util:to_binary(maps:get(side, Event, <<"">>))),
+      event_type => arbiguard_util:to_binary(maps:get(event_type, Event, <<"liquidation_or_margin_call">>)),
+      mark_price => arbiguard_util:to_float(maps:get(mark_price, Event, 0.0), 0.0),
+      liquidation_price => arbiguard_util:to_float(maps:get(liquidation_price, Event, 0.0), 0.0),
+      raw => Event}.
+
+position_key(Position) ->
+    <<(maps:get(exchange, Position, <<"">>))/binary, "|",
+      (maps:get(symbol, Position, <<"">>))/binary, "|",
+      (maps:get(side, Position, <<"">>))/binary>>.
+
+notify_liquidation(Event) ->
+    arbiguard_open_executor ! {live_liquidation_event, Event},
+    arbiguard_close_executor ! {live_liquidation_event, Event},
+    ok.
 
 normalize_funding_settlement(Settlement0) ->
     Settlement = case is_map(Settlement0) of true -> Settlement0; false -> #{} end,
