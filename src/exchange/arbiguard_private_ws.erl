@@ -272,7 +272,12 @@ login_payload(<<"okx">>, Token) ->
     Secret = token_get(api_secret, Token),
     Timestamp = integer_to_binary(erlang:system_time(second)),
     Sign = base64:encode(crypto:mac(hmac, sha256, Secret, <<Timestamp/binary, "GET/users/self/verify">>)),
-    arbiguard_json:encode(#{op => <<"login">>, args => [#{apiKey => ApiKey, passphrase => Passphrase, timestamp => Timestamp, sign => Sign}]}).
+    Login = #{op => <<"login">>,
+              args => [#{apiKey => ApiKey,
+                         passphrase => Passphrase,
+                         timestamp => Timestamp,
+                         sign => Sign}]},
+    arbiguard_json:encode(Login);
 login_payload(<<"gate">>, _Token) -> undefined;
 login_payload(<<"htx">>, _Token) -> undefined;
 login_payload(<<"weex">>, _Token) -> undefined;
