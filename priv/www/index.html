@@ -14,12 +14,17 @@
     .grid{display:grid;grid-template-columns:repeat(6,minmax(150px,1fr));gap:12px}.card{border:1px solid #d7e0ea;border-radius:8px;padding:12px;background:#fbfdff}.label{font-size:13px;color:#63758a}.value{font-size:22px;font-weight:800;margin-top:6px}
     .form{display:grid;grid-template-columns:repeat(6,minmax(150px,1fr));gap:12px;margin-top:14px}label{display:block;font-size:13px;color:#52667c;margin-bottom:5px}input,select{width:100%;box-sizing:border-box;border:1px solid #cfd9e5;border-radius:7px;padding:10px 11px;font-size:14px}
     .table-wrap{overflow:auto;border-top:1px solid #d7e0ea;margin-top:14px}table{width:100%;border-collapse:collapse;min-width:960px}th,td{padding:10px 11px;border-bottom:1px solid #d7e0ea;text-align:left;white-space:nowrap}th{color:#52667c;font-size:13px;background:#fbfdff}
-    .pos{color:#059669}.neg{color:#dc2626}.warn{color:#b45309}.muted{color:#6b7280}.tabs{display:flex;gap:8px;margin-top:10px}.tabs button.active{background:#2563eb;color:white}
+    .pos{color:#059669}.neg{color:#dc2626}.warn{color:#b45309}.muted{color:#6b7280}.tabs{display:flex;gap:8px;margin-top:10px}.tabs button.active{background:#2563eb;color:white}.view{display:none}.view.active{display:block}
   </style>
 </head>
 <body>
   <header><h1>ArbiGuard</h1></header>
   <main>
+    <div class="tabs" style="margin-bottom:14px">
+      <button id="mainTabDashboard" class="active" onclick="setMainTab('dashboard')">主控台</button>
+      <button id="mainTabLocalDebug" onclick="setMainTab('localDebug')">本地模拟接口调试</button>
+    </div>
+    <div id="dashboardView" class="view active">
     <section class="panel">
       <div class="top">
         <div>
@@ -69,6 +74,8 @@
     <section class="panel"><h2>套利机会</h2><div class="table-wrap"><table><thead><tr><th>币种</th><th>类型</th><th>方式</th><th>做多交易所</th><th>做空交易所</th><th>名义仓位</th><th>净回报率</th><th>预期利润</th><th>资金费差</th><th>价格差</th><th>多头资金费</th><th>多头周期/倒计时</th><th>空头资金费</th><th>空头周期/倒计时</th><th>最近结算倒计时</th></tr></thead><tbody id="opRows"></tbody></table></div></section>
     <section class="panel"><h2>模拟盘持仓</h2><div class="table-wrap"><table><thead><tr><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>多头开仓均价</th><th>多头实时价</th><th>空头开仓均价</th><th>空头实时价</th><th>当前浮盈</th><th>预期盈利</th><th>资金费轮数</th><th>资金费金额</th><th>开仓时间</th></tr></thead><tbody id="positionRows"></tbody></table></div></section>
     <section class="panel"><h2>记录</h2><div class="tabs"><button id="tabLogs" class="active" onclick="setLogTab('trades')">成交记录</button><button id="tabSkipped" onclick="setLogTab('skipped')">未执行记录</button><button id="tabLive" onclick="setLogTab('live')">实盘请求</button></div><div class="form"><div><label>历史账户</label><select id="history_account_mode" onchange="loadTradeHistory(1)"><option value="paper">模拟盘</option><option value="live">实盘</option></select></div><div><label>动作</label><select id="history_action" onchange="loadTradeHistory(1)"><option value="">全部</option><option value="open">开仓</option><option value="close">平仓</option></select></div><div><label>页码</label><input id="history_page" value="1"></div><div><label>每页条数</label><input id="history_page_size" value="50"></div><div><label>&nbsp;</label><button onclick="loadTradeHistory(n($('history_page').value))">查询历史</button></div><div><label>&nbsp;</label><button onclick="nextTradePage(1)">下一页</button></div></div><div id="historyPager" class="status">历史记录分页未加载。</div><div class="table-wrap"><table><thead><tr><th>时间</th><th>动作</th><th>账户</th><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>盈亏</th><th>状态/原因</th></tr></thead><tbody id="logRows"></tbody></table></div></section>
+    </div>
+    <div id="localDebugView" class="view">
     <section class="panel">
       <h2>本地模拟接口调试</h2>
       <div class="muted">这里只做本地 dry-run，不会向交易所发送请求，只更新本地调试余额和持仓。</div>
@@ -112,6 +119,7 @@
       </div>
       <div id="liveTestResult" class="status">还没有实盘测试请求。</div>
     </section>
+    </div>
   </main>
 
   <script>
@@ -128,6 +136,7 @@
     const cls=v=>n(v)>=0?'pos':'neg';
     const display=v=>(v===undefined||v===null||v==='undefined'||v==='')?'-':v;
     const esc=v=>String(display(v)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function setMainTab(tab){const dash=tab==='dashboard';$('dashboardView').className=dash?'view active':'view';$('localDebugView').className=dash?'view':'view active';$('mainTabDashboard').className=dash?'active':'';$('mainTabLocalDebug').className=dash?'':'active'}
     async function api(path,opt={}){const r=await fetch(path,{headers:{'content-type':'application/json'},...opt});if(!r.ok)throw new Error(await r.text());return await r.json()}
     function payload(){let p=['capital_usdt','execution_notional_usdt','paper_leverage','max_open_positions','max_position_pct','min_funding_rate','min_price_gap_rate','max_basis_rate','min_execution_profit_usdt','limit'].reduce((a,k)=>(a[k]=n($(k).value),a),{});p.account_mode=$('account_mode').value;return p}
     function setStatus(s){$('status').textContent=s}

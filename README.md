@@ -170,3 +170,4 @@ Important config keys:
 
 - [Architecture and API](docs/architecture.md)
 - [Trading rules](docs/trading_rules.md)
+- [Paper trading flow](docs/paper_flow.md)
