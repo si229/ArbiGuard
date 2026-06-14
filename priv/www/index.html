@@ -147,6 +147,7 @@
           </div>
           <div class="actions">
             <button onclick="refreshAll()">刷新配置状态</button>
+            <button onclick="syncLiveAccount()">同步账户状态</button>
           </div>
         </div>
         <div class="form">
@@ -161,6 +162,17 @@
           <div><label>&nbsp;</label><button class="primary" onclick="saveLiveToken()">保存实盘配置</button></div>
         </div>
         <div id="liveConfigResult" class="status">注意：当前 token 保存到运行进程内存，重启后会丢失；后续应加密落地到 Mnesia 或本地密钥文件。</div>
+        <div class="muted note">同一个实盘总账户可以添加多个交易所。选择交易所后保存，只会新增或更新这个交易所的 token，不会删除其它交易所配置。</div>
+      </section>
+
+      <section class="panel">
+        <h2>总账户交易所配置</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>账户 ID</th><th>交易所</th><th>已配置 Token</th><th>账户进程</th><th>私有 WS</th><th>同步状态</th><th>最近同步</th><th>错误</th></tr></thead>
+            <tbody id="liveExchangeRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
@@ -177,8 +189,9 @@
     <div id="localDebugView" class="view">
       <section class="panel">
         <h2>本地模拟接口调试</h2>
-        <div class="muted">这里只做本地 dry-run，不向交易所发送请求。</div>
+        <div class="muted">这里只做本地 dry-run，不向交易所发送请求；会读取所选总账户中已配置的交易所 API / Token 做权限和参数校验。</div>
         <div class="form">
+          <div><label>总账户</label><select id="debug_account_id"><option value="live-main">live-main</option></select></div>
           <div><label>交易所</label><select id="debug_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
           <div><label>动作</label><select id="debug_action"><option value="open">开仓</option><option value="close">平仓</option><option value="cancel">撤单</option></select></div>
           <div><label>币种</label><input id="debug_symbol" value="BTCUSDT"></div>

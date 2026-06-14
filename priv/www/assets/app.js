@@ -214,6 +214,8 @@ function renderPositions(state) {
 
 function renderLiveAccounts(live) {
   const accounts = live.accounts || [];
+  renderLiveExchanges(live);
+  renderAccountSelects(accounts, live.account_id || "live-main");
   $("liveAccountRows").innerHTML = accounts.map(a => {
     const exchanges = a.exchanges || Object.keys(a.exchange_accounts || {});
     const configured = a.token_configured_exchanges || [];
@@ -228,6 +230,46 @@ function renderLiveAccounts(live) {
     </tr>`;
   }).join("") || `<tr><td colspan="7">暂无实盘账户状态。</td></tr>`;
   $("live_enabled").value = String(Boolean(live.enabled));
+}
+
+function renderAccountSelects(accounts, selected) {
+  const ids = [...new Set((accounts || []).map(a => a.id).filter(Boolean))];
+  if (!ids.includes("live-main")) ids.unshift("live-main");
+  const html = ids.map(id => `<option value="${esc(id)}"${id === selected ? " selected" : ""}>${esc(id)}</option>`).join("");
+  ["debug_account_id", "test_account_id"].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    const old = el.value || selected;
+    el.innerHTML = html;
+    if (ids.includes(old)) el.value = old;
+  });
+}
+
+function renderLiveExchanges(live) {
+  const account = (live.accounts || []).find(a => a.id === (live.account_id || "live-main")) || {};
+  const exchangeAccounts = account.exchange_accounts || {};
+  const configured = new Set(account.token_configured_exchanges || live.token_configured_exchanges || []);
+  const states = {};
+  (live.exchange_states || []).forEach(s => { states[s.exchange] = s; });
+  const ids = [...new Set([
+    ...Object.keys(exchangeAccounts),
+    ...Array.from(configured),
+    ...(live.exchange_accounts || [])
+  ])].sort();
+  $("liveExchangeRows").innerHTML = ids.map(id => {
+    const info = exchangeAccounts[id] || {};
+    const st = states[id] || {};
+    return `<tr>
+      <td>${esc(account.id || live.account_id || "live-main")}</td>
+      <td>${esc(id)}</td>
+      <td class="${configured.has(id) ? "pos" : "warn"}">${configured.has(id) ? "yes" : "no"}</td>
+      <td>${esc(info.account_process || "-")}</td>
+      <td>${esc(info.private_ws || "-")}</td>
+      <td>${esc(st.last_sync_status || "-")}</td>
+      <td>${esc(timeMs(st.last_sync_at))}</td>
+      <td>${esc(st.last_sync_error || st.error || "-")}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="8">这个总账户还没有添加交易所。先选择交易所并保存 API 配置。</td></tr>`;
 }
 
 function setLogTab(tab) {
@@ -377,7 +419,7 @@ async function saveLiveToken() {
       note: $("live_note").value
     };
     await api("/api/live/token", {method: "POST", body: JSON.stringify(token)});
-    $("liveConfigResult").textContent = `实盘配置已保存：账户 ${account_id} / ${exchange} / enabled=${enabled}`;
+    $("liveConfigResult").textContent = `已添加/更新交易所配置：账户 ${account_id} / ${exchange} / enabled=${enabled}。其它已配置交易所不会被删除。`;
     $("live_api_key").value = "";
     $("live_api_secret").value = "";
     $("live_passphrase").value = "";
@@ -388,9 +430,21 @@ async function saveLiveToken() {
   }
 }
 
+async function syncLiveAccount() {
+  try {
+    const account_id = $("live_account_id").value || "live-main";
+    const r = await api("/api/live/sync", {method: "POST", body: JSON.stringify({account_id})});
+    $("liveConfigResult").textContent = `账户同步已提交：${r.account_id || account_id}`;
+    await refreshAll();
+  } catch (e) {
+    $("liveConfigResult").textContent = `同步账户状态失败：${e.message}`;
+  }
+}
+
 async function debugExchangeOrder() {
   try {
     const body = {
+      account_id: $("debug_account_id").value || "live-main",
       exchange: $("debug_exchange").value,
       action: $("debug_action").value,
       symbol: $("debug_symbol").value,
@@ -398,7 +452,8 @@ async function debugExchangeOrder() {
       notional: num($("debug_notional").value),
       price: num($("debug_price").value),
       leverage: num($("debug_leverage").value),
-      order_id: $("debug_order_id").value
+      order_id: $("debug_order_id").value,
+      dry_run: true
     };
     const r = await api("/api/debug/exchange/order", {method: "POST", body: JSON.stringify(body)});
     $("debugResult").textContent = JSON.stringify(r);

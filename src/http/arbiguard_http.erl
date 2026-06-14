@@ -140,7 +140,8 @@ route(#{method := <<"POST">>, path := <<"/api/trades/stats">>, body := Body}) ->
 route(#{method := <<"GET">>, path := <<"/api/live/state">>}) ->
     json_response(200, live_state());
 route(#{method := <<"POST">>, path := <<"/api/debug/exchange/order">>, body := Body}) ->
-    json_response(200, #{ok => false, reason => <<"debug_order_removed_use_live_test_order">>, payload => safe_decode(Body)});
+    Payload = safe_decode(Body),
+    json_response(200, arbiguard_account_manager:test_order(Payload#{dry_run => true}));
 route(#{method := <<"POST">>, path := <<"/api/live/test-order">>, body := Body}) ->
     json_response(200, arbiguard_account_manager:test_order(safe_decode(Body)));
 route(#{method := <<"POST">>, path := <<"/api/live/enabled">>, body := Body}) ->
@@ -153,6 +154,11 @@ route(#{method := <<"POST">>, path := <<"/api/live/token">>, body := Body}) ->
     AccountID = maps:get(account_id, Payload, <<"live-main">>),
     Token = maps:remove(exchange, Payload),
     json_response(200, arbiguard_account_manager:set_exchange_token(AccountID, Exchange, Token));
+route(#{method := <<"POST">>, path := <<"/api/live/sync">>, body := Body}) ->
+    Payload = safe_decode(Body),
+    AccountID = maps:get(account_id, Payload, <<"live-main">>),
+    ok = arbiguard_account_manager:sync_account(AccountID),
+    json_response(200, #{ok => true, account_id => AccountID, status => <<"sync_requested">>});
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
     Payload = safe_decode(Body),
     ExecutorReset = arbiguard_executor:reset(),

@@ -126,11 +126,12 @@ handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) 
     AccountID = maps:get(account_id, Payload),
     ExchangeID = maps:get(exchange, Payload),
     Token = arbiguard_exchange_account:get_token(AccountID, ExchangeID),
-    Result = case {maps:get(AccountID, Accounts, undefined), Token, maps:get(confirm, Payload, <<"">>)} of
+    Result = case {maps:get(AccountID, Accounts, undefined), Token, maps:get(confirm, Payload, <<"">>), truthy(maps:get(dry_run, Payload, false))} of
         {undefined, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"account_not_found">>};
-        {_, undefined, _} -> #{ok => false, status => <<"rejected">>, reason => <<"live_token_not_configured">>};
-        {_, _, <<"LIVE">>} -> arbiguard_live_adapter:test_order(Payload, Token);
-        {_, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"confirm_live_required">>}
+        {_, undefined, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"live_token_not_configured">>};
+        {_, _, _, true} -> dry_run_order(Payload, Token);
+        {_, _, <<"LIVE">>, _} -> arbiguard_live_adapter:test_order(Payload, Token);
+        {_, _, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"confirm_live_required">>}
     end,
     {reply, Result#{account_id => AccountID, exchange => ExchangeID}, State};
 handle_call(_Req, _From, State) ->
@@ -555,5 +556,28 @@ normalize_test_payload(Payload0) ->
         leverage => max(1.0, arbiguard_util:to_float(maps:get(leverage, Payload, 1), 1)),
         reduce_only => truthy(maps:get(reduce_only, Payload, false)),
         client_order_id => arbiguard_util:to_binary(maps:get(client_order_id, Payload, <<"">>)),
-        confirm => arbiguard_util:to_binary(maps:get(confirm, Payload, <<"">>))
+        confirm => arbiguard_util:to_binary(maps:get(confirm, Payload, <<"">>)),
+        dry_run => truthy(maps:get(dry_run, Payload, false))
     }.
+
+dry_run_order(Payload, Token) ->
+    HasToken = case Token of
+        T when is_map(T) ->
+            maps:get(api_key, T, maps:get(<<"api_key">>, T, <<"">>)) =/= <<"">> andalso
+            maps:get(api_secret, T, maps:get(<<"api_secret">>, T, <<"">>)) =/= <<"">>;
+        _ -> false
+    end,
+    case HasToken of
+        true ->
+            #{ok => true,
+              status => <<"dry_run_ok">>,
+              reason => <<"validated_with_configured_account_token_no_exchange_request_sent">>,
+              action => maps:get(action, Payload, <<"">>),
+              symbol => maps:get(symbol, Payload, <<"">>),
+              side => maps:get(side, Payload, <<"">>),
+              quantity => maps:get(quantity, Payload, 0),
+              price => maps:get(price, Payload, 0),
+              reduce_only => maps:get(reduce_only, Payload, false)};
+        false ->
+            #{ok => false, status => <<"rejected">>, reason => <<"live_token_not_configured">>}
+    end.

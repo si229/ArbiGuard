@@ -387,6 +387,14 @@ maybe_reply_ws(Msg, #state{id = <<"htx">>, ws_conn = ConnPid, ws_stream = Stream
         undefined -> ok;
         Ping -> catch gun:ws_send(ConnPid, StreamRef, {text, arbiguard_json:encode(#{pong => Ping})})
     end;
+maybe_reply_ws(Msg, #state{id = <<"weex">>, ws_conn = ConnPid, ws_stream = StreamRef})
+        when ConnPid =/= undefined, StreamRef =/= undefined ->
+    Event = map_get_any([event, <<"event">>], Msg, <<"">>),
+    Type = map_get_any([type, <<"type">>], Msg, <<"">>),
+    case Event =:= <<"ping">> orelse Type =:= <<"ping">> of
+        true -> catch gun:ws_send(ConnPid, StreamRef, {text, arbiguard_json:encode(#{method => <<"PONG">>, id => 1})});
+        false -> ok
+    end;
 maybe_reply_ws(_Msg, _State) ->
     ok.
 
