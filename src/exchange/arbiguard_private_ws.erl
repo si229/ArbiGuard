@@ -1,7 +1,8 @@
 -module(arbiguard_private_ws).
 -behaviour(gen_server).
 
--export([start_link/1, start_link/2, snapshot/1, snapshot/2, name/1, name/2, inject_event/2]).
+-export([start_link/1, start_link/2, snapshot/1, snapshot/2, name/1, name/2,
+         inject_event/2, refresh_auth/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {account_id = <<"live-main">>, exchange, id, ws_enabled = false, ws_connected = false,
@@ -25,6 +26,9 @@ snapshot(AccountID, ExchangeID) ->
 
 inject_event(ExchangeID, Event) ->
     gen_server:cast(name(ExchangeID), {inject_event, Event}).
+
+refresh_auth(AccountID, ExchangeID) ->
+    gen_server:cast(name(AccountID, ExchangeID), refresh_auth).
 
 name(ExchangeID) ->
     list_to_atom("arbiguard_private_ws_" ++ binary_to_list(string:lowercase(arbiguard_util:to_binary(ExchangeID)))).
@@ -61,6 +65,11 @@ handle_call(_Req, _From, State) ->
 
 handle_cast({inject_event, Event}, State) ->
     {noreply, dispatch_private_event(Event, State)};
+handle_cast(refresh_auth, State = #state{ws_connected = true}) ->
+    {noreply, login_and_subscribe(State#state{logged_in = false, subscribed = false})};
+handle_cast(refresh_auth, State) ->
+    self() ! start_ws,
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 

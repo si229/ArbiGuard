@@ -1,4 +1,5 @@
 let lastState = {};
+let lastLive = {};
 let logTab = "trades";
 let tradePage = {page: 1, page_size: 50, total: 0, total_pages: 0, trades: []};
 
@@ -66,11 +67,11 @@ async function api(path, opt = {}) {
 }
 
 function setStatus(s) {
-  $("status").textContent = s;
+  $("globalStatus").textContent = s;
 }
 
 function card(k, v, c = "") {
-  return `<div class="card"><div class="label">${k}</div><div class="value ${c}">${v}</div></div>`;
+  return `<div class="card"><div class="label">${esc(k)}</div><div class="value ${c}">${esc(v)}</div></div>`;
 }
 
 function payload() {
@@ -92,11 +93,15 @@ function payload() {
 }
 
 function setMainTab(tab) {
-  const dashboard = tab === "dashboard";
-  $("dashboardView").className = dashboard ? "view active" : "view";
-  $("localDebugView").className = dashboard ? "view" : "view active";
-  $("mainTabDashboard").className = dashboard ? "active" : "";
-  $("mainTabLocalDebug").className = dashboard ? "" : "active";
+  const views = {
+    dashboard: ["dashboardView", "mainTabDashboard"],
+    liveConfig: ["liveConfigView", "mainTabLiveConfig"],
+    localDebug: ["localDebugView", "mainTabLocalDebug"]
+  };
+  Object.entries(views).forEach(([name, [viewId, tabId]]) => {
+    $(viewId).className = name === tab ? "view active" : "view";
+    $(tabId).className = name === tab ? "active" : "";
+  });
 }
 
 function renderCards(proc, state, live) {
@@ -131,54 +136,6 @@ function renderExchangeFunds(state) {
   }).join("") || `<tr><td colspan="5">暂无交易所资金数据。</td></tr>`;
 }
 
-function renderProfitBreakdown(state) {
-  const b = state.profit_breakdown || {};
-  $("profitBreakdownRows").innerHTML = `<tr>
-    <td class="${cls(b.net_pnl)}">${money(b.net_pnl)}</td>
-    <td class="${cls(b.realized_net_pnl)}">${money(b.realized_net_pnl)}</td>
-    <td class="${cls(b.unrealized_net_pnl)}">${money(b.unrealized_net_pnl)}</td>
-    <td class="${cls(b.price_pnl)}">${money(b.price_pnl)}</td>
-    <td class="${cls(b.funding_pnl)}">${money(b.funding_pnl)}</td>
-    <td class="neg">${money(b.open_fee)}</td>
-    <td class="neg">${money(b.close_fee)}</td>
-    <td class="neg">${money(b.estimated_close_fee)}</td>
-    <td class="${cls(b.slippage_pnl)}">${money(b.slippage_pnl)}</td>
-    <td class="${cls(b.rollback_pnl)}">${money(b.rollback_pnl)}</td>
-    <td class="${cls(b.liquidation_pnl)}">${money(b.liquidation_pnl)}</td>
-    <td class="${cls(b.other_pnl)}">${money(b.other_pnl)}</td>
-  </tr>`;
-}
-
-function renderPairStats(state) {
-  const rows = (state.pair_stats || []).slice().sort((a, b) => num(b.net_pnl) - num(a.net_pnl));
-  $("pairStatsRows").innerHTML = rows.map((r, i) => `<tr>
-    <td>${i + 1}</td><td>${esc(r.pair)}</td>
-    <td class="${cls(r.net_pnl)}">${money(r.net_pnl)}</td>
-    <td class="${cls(r.funding_pnl)}">${money(r.funding_pnl)}</td>
-    <td class="${cls(r.price_pnl)}">${money(r.price_pnl)}</td>
-    <td class="${cls(r.slippage_pnl)}">${money(r.slippage_pnl)}</td>
-    <td class="${cls(r.rollback_pnl)}">${money(r.rollback_pnl)}</td>
-    <td class="${cls(r.liquidation_pnl)}">${money(r.liquidation_pnl)}</td>
-    <td class="neg">${money(r.open_fee)}</td>
-    <td class="neg">${money(r.close_fee)}</td>
-    <td class="neg">${money(r.total_fee)}</td>
-    <td>${esc(r.trade_count || 0)}</td>
-    <td>${esc(r.position_count || 0)}</td>
-  </tr>`).join("") || `<tr><td colspan="13">暂无交易所对统计。</td></tr>`;
-}
-
-function renderWsConfig(cfg) {
-  $("wsRows").innerHTML = (cfg.exchanges || []).map(e => `<tr>
-    <td>${esc(e.id)}</td>
-    <td><input id="ws_host_${esc(e.id)}" value="${esc(e.ws_host || "")}"></td>
-    <td><input id="ws_port_${esc(e.id)}" value="${esc(e.ws_port || 443)}"></td>
-    <td><input id="ws_path_${esc(e.id)}" value="${esc(e.ws_path || "/")}"></td>
-    <td><input id="max_single_${esc(e.id)}" value="${esc(e.max_single_order_usdt || 0)}"></td>
-    <td><input id="max_total_${esc(e.id)}" value="${esc(e.max_total_position_usdt || 0)}"></td>
-    <td><button onclick="saveExchange('${esc(e.id)}')">保存</button></td>
-  </tr>`).join("") || `<tr><td colspan="7">暂无交易所配置。</td></tr>`;
-}
-
 function renderProcesses(proc) {
   $("processRows").innerHTML = (proc.exchanges || []).map(e => {
     const t = e.ticker || {};
@@ -194,12 +151,10 @@ function renderProcesses(proc) {
       <td class="${p.ws_connected ? "pos" : "warn"}">${esc(p.ws_connected)}</td>
       <td class="${p.logged_in ? "pos" : "warn"}">${esc(p.logged_in)}</td>
       <td class="${p.subscribed ? "pos" : "warn"}">${esc(p.subscribed)}</td>
-      <td>${esc(p.ws_status || "-")}</td>
-      <td>${esc(timeMs(p.last_event_at))}</td>
       <td>${esc(f.last_count ?? "-")}</td>
       <td>${esc(p.ws_error || t.ws_error || f.last_error || "-")}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="13">暂无进程状态。</td></tr>`;
+  }).join("") || `<tr><td colspan="11">暂无进程状态。</td></tr>`;
 }
 
 function renderOrders(exec) {
@@ -212,14 +167,12 @@ function renderOrders(exec) {
       <td>${esc(o.symbol)}</td><td>${esc(o.long_exchange)}</td><td>${esc(o.short_exchange)}</td>
       <td>${esc(statusText(o.status))}</td><td>${esc(reason)}</td>
       <td>${money(o.target_notional)}</td><td>${money(o.confirmed_notional)}</td><td>${progress.toFixed(1)}%</td>
-      <td>${money(o.long_confirmed_notional)} / ${esc(num(o.long_filled_qty).toFixed(8))}</td>
-      <td>${money(o.short_confirmed_notional)} / ${esc(num(o.short_filled_qty).toFixed(8))}</td>
       <td class="neg">${money(o.execution_fee)}</td><td class="${cls(o.actual_pnl)}">${money(o.actual_pnl)}</td>
       <td>${quoteCell(d.long_bid, d.long_ask, d.long_updated_at)}</td>
       <td>${quoteCell(d.short_bid, d.short_ask, d.short_updated_at)}</td>
       <td class="${cls(o.expected_net_profit)}">${money(o.expected_net_profit)}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="15">暂无开仓执行单。</td></tr>`;
+  }).join("") || `<tr><td colspan="13">暂无开仓执行单。</td></tr>`;
 }
 
 function renderOpenRejects(exec) {
@@ -238,12 +191,8 @@ function renderOps(ops) {
     <td class="${cls(o.expected_net_return)}">${pct(o.expected_net_return)}</td>
     <td class="${cls(o.estimated_net_profit_usdt ?? o.estimated_net_profit)}">${money(o.estimated_net_profit_usdt ?? o.estimated_net_profit)}</td>
     <td>${pct(o.funding_edge ?? o.funding_edge_return)}</td><td>${pct(o.price_gap_rate ?? o.price_gap_return)}</td>
-    <td class="${cls(-num(o.long_funding_rate))}">${pct(o.long_funding_rate)}</td>
-    <td>${esc(o.long_funding_interval_hours || "-")}h / ${esc(countdown(o.long_next_funding_time))}</td>
-    <td class="${cls(o.short_funding_rate)}">${pct(o.short_funding_rate)}</td>
-    <td>${esc(o.short_funding_interval_hours || "-")}h / ${esc(countdown(o.short_next_funding_time))}</td>
     <td>${esc(countdown(nearestFunding(o.long_next_funding_time, o.short_next_funding_time)))}</td>
-  </tr>`).join("") || `<tr><td colspan="15">暂无套利机会。</td></tr>`;
+  </tr>`).join("") || `<tr><td colspan="11">暂无套利机会。</td></tr>`;
 }
 
 function renderPositions(state) {
@@ -261,6 +210,24 @@ function renderPositions(state) {
       <td>${esc(timeMs(p.opened_at))}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="13">暂无持仓。</td></tr>`;
+}
+
+function renderLiveAccounts(live) {
+  const accounts = live.accounts || [];
+  $("liveAccountRows").innerHTML = accounts.map(a => {
+    const exchanges = a.exchanges || Object.keys(a.exchange_accounts || {});
+    const configured = a.token_configured_exchanges || [];
+    return `<tr>
+      <td>${esc(a.id)}</td>
+      <td>${esc(a.mode)}</td>
+      <td class="${a.live_enabled ? "pos" : "warn"}">${esc(a.live_enabled)}</td>
+      <td>${esc(exchanges.join(", ") || "-")}</td>
+      <td>${esc(configured.join(", ") || "-")}</td>
+      <td>${esc(a.open_executor || "-")}</td>
+      <td>${esc(a.close_executor || "-")}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="7">暂无实盘账户状态。</td></tr>`;
+  $("live_enabled").value = String(Boolean(live.enabled));
 }
 
 function setLogTab(tab) {
@@ -294,7 +261,7 @@ function nextTradePage(delta) {
 }
 
 function renderLogs(state) {
-  let logs = logTab === "live"
+  const logs = logTab === "live"
     ? (state.live_logs || [])
     : (logTab === "trades" ? (tradePage.trades || []) : (state.logs || []).filter(x => String(x.action || "").includes("skip")));
   $("historyPager").textContent = logTab === "trades"
@@ -332,51 +299,28 @@ async function refreshAll() {
     const proc = value(0, {});
     const state = value(1, lastState || {});
     const exec = value(2, {});
-    const live = value(3, {});
-    const cfg = value(4, {});
+    const live = value(3, lastLive || {});
     const failed = settled
       .map((x, i) => x.status === "rejected" ? ["进程", "模拟盘", "执行", "实盘", "配置"][i] : "")
       .filter(Boolean);
     proc.executor = exec;
     state.live_logs = live.logs || [];
     lastState = state;
+    lastLive = live;
     renderCards(proc, state, live);
     renderExchangeFunds(state);
-    renderProfitBreakdown(state);
-    renderPairStats(state);
-    renderWsConfig(cfg);
     renderProcesses(proc);
     renderOrders(exec);
     renderOpenRejects(exec);
     renderOps(exec.last_opportunities || []);
     renderPositions(state);
+    renderLiveAccounts(live);
     renderDebugState(live);
     if (logTab === "trades") await loadTradeHistory(num($("history_page").value) || 1);
     else renderLogs(state);
     setStatus(failed.length ? `部分刷新成功，失败接口：${failed.join("、")}` : "已刷新。");
   } catch (e) {
     setStatus(`刷新失败：${e.message}`);
-  }
-}
-
-async function saveExchange(id) {
-  try {
-    setStatus("正在保存交易所配置...");
-    await api("/api/config/exchange/ws", {method: "POST", body: JSON.stringify({
-      exchange: id,
-      ws_host: $(`ws_host_${id}`).value,
-      ws_port: num($(`ws_port_${id}`).value),
-      ws_path: $(`ws_path_${id}`).value
-    })});
-    await api("/api/config/exchange/limits", {method: "POST", body: JSON.stringify({
-      exchange: id,
-      max_single_order_usdt: num($(`max_single_${id}`).value),
-      max_total_position_usdt: num($(`max_total_${id}`).value)
-    })});
-    await refreshAll();
-    setStatus("交易所配置已保存。");
-  } catch (e) {
-    setStatus(`保存交易所配置失败：${e.message}`);
   }
 }
 
@@ -417,6 +361,33 @@ async function resetPaper() {
   }
 }
 
+async function saveLiveToken() {
+  try {
+    const account_id = $("live_account_id").value || "live-main";
+    const enabled = $("live_enabled").value === "true";
+    const exchange = $("live_exchange").value;
+    await api("/api/live/enabled", {method: "POST", body: JSON.stringify({account_id, enabled})});
+    const token = {
+      account_id,
+      exchange,
+      api_key: $("live_api_key").value,
+      api_secret: $("live_api_secret").value,
+      passphrase: $("live_passphrase").value,
+      access_token: $("live_access_token").value,
+      note: $("live_note").value
+    };
+    await api("/api/live/token", {method: "POST", body: JSON.stringify(token)});
+    $("liveConfigResult").textContent = `实盘配置已保存：账户 ${account_id} / ${exchange} / enabled=${enabled}`;
+    $("live_api_key").value = "";
+    $("live_api_secret").value = "";
+    $("live_passphrase").value = "";
+    $("live_access_token").value = "";
+    await refreshAll();
+  } catch (e) {
+    $("liveConfigResult").textContent = `保存实盘配置失败：${e.message}`;
+  }
+}
+
 async function debugExchangeOrder() {
   try {
     const body = {
@@ -437,28 +408,11 @@ async function debugExchangeOrder() {
   }
 }
 
-async function saveLiveToken() {
-  try {
-    const enabled = $("live_enabled").value === "true";
-    const exchange = $("live_exchange").value;
-    await api("/api/live/enabled", {method: "POST", body: JSON.stringify({enabled})});
-    await api("/api/live/token", {method: "POST", body: JSON.stringify({
-      exchange,
-      api_key: $("live_api_key").value,
-      api_secret: $("live_api_secret").value,
-      passphrase: $("live_passphrase").value
-    })});
-    $("liveTestResult").textContent = `实盘配置已保存：${exchange} enabled=${enabled}`;
-    await refreshAll();
-  } catch (e) {
-    $("liveTestResult").textContent = `保存实盘配置失败：${e.message}`;
-  }
-}
-
 async function liveTestOrder() {
   try {
     const body = {
-      exchange: $("live_exchange").value,
+      account_id: $("test_account_id").value || "live-main",
+      exchange: $("test_exchange").value,
       action: $("live_action").value,
       symbol: $("live_symbol").value,
       side: $("live_side").value,

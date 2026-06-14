@@ -1,14 +1,15 @@
 -module(arbiguard_exchange_account).
 -behaviour(gen_server).
 
--export([start_link/3, name/2, snapshot/2, set_token/3, get_token/2,
+-export([start_link/3, name/2, snapshot/2, sync_now/2, set_token/3, get_token/2,
          report_order_event/3, report_balance/3, report_position/3,
          report_liquidation/3, report_funding_settlement/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {account_id, exchange_id, config = #{}, token = undefined,
                 balances = #{}, positions = #{}, orders = #{}, liquidations = [],
-                logs = []}).
+                logs = [], last_sync_at = 0, last_sync_status = <<"not_started">>,
+                last_sync_error = undefined}).
 
 start_link(AccountID, ExchangeID, Config) ->
     gen_server:start_link({local, name(AccountID, ExchangeID)}, ?MODULE,
@@ -19,6 +20,9 @@ name(AccountID, ExchangeID) ->
 
 snapshot(AccountID, ExchangeID) ->
     gen_server:call(name(AccountID, ExchangeID), snapshot).
+
+sync_now(AccountID, ExchangeID) ->
+    gen_server:call(name(AccountID, ExchangeID), sync_now, 30000).
 
 set_token(AccountID, ExchangeID, Token) ->
     gen_server:call(name(AccountID, ExchangeID), {set_token, Token}).
@@ -51,9 +55,13 @@ init([AccountID0, ExchangeID0, Config]) ->
 
 handle_call(snapshot, _From, State) ->
     {reply, public_state(State), State};
+handle_call(sync_now, _From, State) ->
+    {Result, State1} = run_account_sync(State),
+    {reply, Result, State1};
 handle_call({set_token, Token}, _From, State) ->
     lager:info("exchange account token configured account=~s exchange=~s",
                [State#state.account_id, State#state.exchange_id]),
+    self() ! sync_account_snapshot,
     {reply, ok, State#state{token = Token}};
 handle_call(get_token, _From, State) ->
     {reply, State#state.token, State};
@@ -84,6 +92,9 @@ handle_cast({report_funding_settlement, Event0}, State = #state{logs = Logs}) ->
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id},
     {noreply, State#state{logs = add_log(<<"funding">>, Event, Logs)}};
 handle_cast(_Msg, State) -> {noreply, State}.
+handle_info(sync_account_snapshot, State) ->
+    {_Result, State1} = run_account_sync(State),
+    {noreply, State1};
 handle_info(_Info, State) -> {noreply, State}.
 terminate(_Reason, _State) -> ok.
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
@@ -103,7 +114,94 @@ public_state(State) ->
       positions => maps:values(State#state.positions),
       orders => maps:values(State#state.orders),
       liquidations => State#state.liquidations,
-      logs => State#state.logs}.
+      logs => State#state.logs,
+      last_sync_at => State#state.last_sync_at,
+      last_sync_status => State#state.last_sync_status,
+      last_sync_error => State#state.last_sync_error}.
+
+run_account_sync(State = #state{token = undefined}) ->
+    Reason = <<"live_token_not_configured">>,
+    Result = #{ok => false, reason => Reason, exchange => State#state.exchange_id},
+    {Result, sync_status(State, <<"failed">>, Reason)};
+run_account_sync(State) ->
+    Result0 = catch arbiguard_live_adapter:account_snapshot(State#state.exchange_id, State#state.config, State#state.token),
+    Result = case Result0 of
+        R when is_map(R) -> R;
+        {'EXIT', Reason} -> #{ok => false, reason => <<"live_snapshot_exception">>, detail => fmt(Reason)};
+        _ -> #{ok => false, reason => <<"live_snapshot_bad_result">>}
+    end,
+    State1 = apply_snapshot_result(Result, State),
+    notify_account_manager(Result, State1),
+    {Result, State1}.
+
+apply_snapshot_result(Result, State) ->
+    Status = case maps:get(ok, Result, false) of true -> <<"ok">>; _ -> <<"failed">> end,
+    Error = case Status of <<"ok">> -> undefined; _ -> maps:get(reason, Result, <<"live_snapshot_failed">>) end,
+    Balances = merge_balances(maps:get(balances, Result, #{}), State#state.balances),
+    Positions = merge_positions(maps:get(positions, Result, []), State#state.positions, State),
+    Orders = merge_orders(maps:get(orders, Result, []), State#state.orders, State),
+    Log = add_log(<<"account_snapshot">>, maps:without([raw], Result), State#state.logs),
+    State#state{balances = Balances,
+                positions = Positions,
+                orders = Orders,
+                logs = Log,
+                last_sync_at = arbiguard_util:now_ms(),
+                last_sync_status = Status,
+                last_sync_error = Error}.
+
+merge_balances(Balances0, Old) when is_map(Balances0) ->
+    maps:fold(fun(_K, Balance0, Acc) ->
+        Balance = ensure_map(Balance0),
+        Asset = maps:get(asset, Balance, <<"USDT">>),
+        Acc#{Asset => Balance}
+    end, Old, Balances0);
+merge_balances(Balances0, Old) when is_list(Balances0) ->
+    lists:foldl(fun(Balance0, Acc) ->
+        Balance = ensure_map(Balance0),
+        Asset = maps:get(asset, Balance, <<"USDT">>),
+        Acc#{Asset => Balance}
+    end, Old, Balances0);
+merge_balances(_Balances, Old) ->
+    Old.
+
+merge_positions(Positions0, Old, State) when is_list(Positions0) ->
+    lists:foldl(fun(Position0, Acc) ->
+        Position = (ensure_map(Position0))#{account_id => State#state.account_id,
+                                            exchange => State#state.exchange_id,
+                                            updated_at => arbiguard_util:now_ms()},
+        Acc#{position_key(Position) => Position}
+    end, Old, Positions0);
+merge_positions(_Positions, Old, _State) ->
+    Old.
+
+merge_orders(Orders0, Old, State) when is_list(Orders0) ->
+    lists:foldl(fun(Order0, Acc) ->
+        Order = (ensure_map(Order0))#{account_id => State#state.account_id,
+                                      exchange => State#state.exchange_id,
+                                      updated_at => arbiguard_util:now_ms()},
+        OrderID = maps:get(order_id, Order, maps:get(id, Order, <<"">>)),
+        case OrderID of <<"">> -> Acc; _ -> Acc#{OrderID => Order} end
+    end, Old, Orders0);
+merge_orders(_Orders, Old, _State) ->
+    Old.
+
+notify_account_manager(Result, State) ->
+    case maps:get(ok, Result, false) of
+        true -> arbiguard_account_manager:exchange_snapshot_synced(State#state.account_id, State#state.exchange_id, public_state(State));
+        _ -> ok
+    end.
+
+sync_status(State, Status, Error) ->
+    State#state{last_sync_at = arbiguard_util:now_ms(),
+                last_sync_status = Status,
+                last_sync_error = Error,
+                logs = add_log(<<"account_snapshot">>, #{ok => false, reason => Error}, State#state.logs)}.
+
+ensure_map(Map) when is_map(Map) -> Map;
+ensure_map(_) -> #{}.
+
+fmt(Term) ->
+    unicode:characters_to_binary(io_lib:format("~p", [Term])).
 
 position_key(Position) ->
     <<(maps:get(symbol, Position, <<"">>))/binary, "|",

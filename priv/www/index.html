@@ -15,8 +15,11 @@
   <main>
     <div class="tabs main-tabs">
       <button id="mainTabDashboard" class="active" onclick="setMainTab('dashboard')">主控台</button>
-      <button id="mainTabLocalDebug" onclick="setMainTab('localDebug')">本地模拟接口调试</button>
+      <button id="mainTabLiveConfig" onclick="setMainTab('liveConfig')">实盘配置</button>
+      <button id="mainTabLocalDebug" onclick="setMainTab('localDebug')">接口调试</button>
     </div>
+
+    <div id="globalStatus" class="status">页面已加载。</div>
 
     <div id="dashboardView" class="view active">
       <section class="panel">
@@ -32,7 +35,7 @@
             <button class="danger" onclick="resetPaper()">重置模拟盘</button>
           </div>
         </div>
-        <div id="status" class="status">页面已加载。</div>
+
         <div class="form">
           <div><label>账户模式</label><select id="account_mode"><option value="paper">模拟盘</option><option value="live">实盘</option></select></div>
           <div><label>本金 USDT</label><input id="capital_usdt" value="10000"></div>
@@ -60,65 +63,53 @@
       </section>
 
       <section class="panel">
-        <h2>利润来源分布</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>净收益</th><th>已实现</th><th>当前浮盈</th><th>价差收益</th><th>资金费收益</th>
-          <th>开仓手续费</th><th>平仓手续费</th><th>预估平仓手续费</th><th>滑点</th><th>回滚/补对冲</th><th>爆仓保护</th><th>其它差额</th>
-        </tr></thead><tbody id="profitBreakdownRows"></tbody></table></div>
-      </section>
-
-      <section class="panel">
-        <h2>交易所对盈利排名</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>排名</th><th>交易所对</th><th>净收益</th><th>资金费</th><th>价差</th><th>滑点</th>
-          <th>回滚/补对冲</th><th>爆仓保护</th><th>开仓手续费</th><th>平仓手续费</th><th>总手续费</th><th>成交记录</th><th>当前持仓</th>
-        </tr></thead><tbody id="pairStatsRows"></tbody></table></div>
-      </section>
-
-      <section class="panel">
-        <h2>交易所配置</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>交易所</th><th>Host</th><th>端口</th><th>路径</th><th>单笔委托上限(U)</th><th>总持仓上限(U)</th><th>操作</th>
-        </tr></thead><tbody id="wsRows"></tbody></table></div>
-      </section>
-
-      <section class="panel">
         <h2>进程 / ETS 状态</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>交易所</th><th>行情 WS</th><th>行情连接</th><th>行情状态</th><th>本地订阅</th>
-          <th>私有 WS</th><th>私有连接</th><th>登录</th><th>订阅</th><th>私有状态</th><th>最近账户事件</th><th>资金费行数</th><th>错误</th>
-        </tr></thead><tbody id="processRows"></tbody></table></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>交易所</th><th>行情 WS</th><th>行情连接</th><th>行情状态</th><th>本地订阅</th><th>私有 WS</th><th>私有连接</th><th>登录</th><th>订阅</th><th>资金费行数</th><th>错误</th></tr></thead>
+            <tbody id="processRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
         <h2>开仓执行单状态</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>币种</th><th>做多</th><th>做空</th><th>状态</th><th>等待原因</th><th>任务总量</th><th>当前成交</th><th>进度</th>
-          <th>多头成交</th><th>空头成交</th><th>手续费</th><th>实际盈利</th><th>多头 bid/ask</th><th>空头 bid/ask</th><th>预期利润</th>
-        </tr></thead><tbody id="orderRows"></tbody></table></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>币种</th><th>做多</th><th>做空</th><th>状态</th><th>等待原因</th><th>任务总量</th><th>当前成交</th><th>进度</th><th>手续费</th><th>实际盈利</th><th>多头 bid/ask</th><th>空头 bid/ask</th><th>预期利润</th></tr></thead>
+            <tbody id="orderRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
         <h2>最近未开仓原因</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>时间</th><th>币种</th><th>做多</th><th>做空</th><th>原因</th><th>预期利润</th><th>最低利润</th><th>持仓/上限</th><th>执行单</th>
-        </tr></thead><tbody id="openRejectRows"></tbody></table></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>币种</th><th>做多</th><th>做空</th><th>原因</th><th>预期利润</th><th>最低利润</th><th>持仓/上限</th><th>执行单</th></tr></thead>
+            <tbody id="openRejectRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
         <h2>套利机会</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>币种</th><th>类型</th><th>方式</th><th>做多交易所</th><th>做空交易所</th><th>名义仓位</th><th>净回报率</th><th>预期利润</th>
-          <th>资金费差</th><th>价格差</th><th>多头资金费</th><th>多头周期/倒计时</th><th>空头资金费</th><th>空头周期/倒计时</th><th>最近结算倒计时</th>
-        </tr></thead><tbody id="opRows"></tbody></table></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>币种</th><th>类型</th><th>方式</th><th>做多交易所</th><th>做空交易所</th><th>名义仓位</th><th>净回报率</th><th>预期利润</th><th>资金费差</th><th>价格差</th><th>最近结算倒计时</th></tr></thead>
+            <tbody id="opRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
         <h2>模拟盘持仓</h2>
-        <div class="table-wrap"><table><thead><tr>
-          <th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>多头开仓均价</th><th>多头实时价</th>
-          <th>空头开仓均价</th><th>空头实时价</th><th>当前浮盈</th><th>预期盈利</th><th>资金费轮数</th><th>资金费金额</th><th>开仓时间</th>
-        </tr></thead><tbody id="positionRows"></tbody></table></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>多头开仓均价</th><th>多头实时价</th><th>空头开仓均价</th><th>空头实时价</th><th>当前浮盈</th><th>预期盈利</th><th>资金费轮数</th><th>资金费金额</th><th>开仓时间</th></tr></thead>
+            <tbody id="positionRows"></tbody>
+          </table>
+        </div>
         <div class="muted note">当前浮盈 = 多头按当前 bid 平仓收益 + 空头按当前 ask 平仓收益 - 预估平仓手续费；不包含未来资金费。</div>
       </section>
 
@@ -138,16 +129,55 @@
           <div><label>&nbsp;</label><button onclick="nextTradePage(1)">下一页</button></div>
         </div>
         <div id="historyPager" class="status">历史记录分页未加载。</div>
-        <div class="table-wrap"><table><thead><tr>
-          <th>时间</th><th>动作</th><th>账户</th><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>盈亏</th><th>状态/原因</th>
-        </tr></thead><tbody id="logRows"></tbody></table></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>动作</th><th>账户</th><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>盈亏</th><th>状态/原因</th></tr></thead>
+            <tbody id="logRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div id="liveConfigView" class="view">
+      <section class="panel">
+        <div class="top">
+          <div>
+            <h2>实盘账户配置</h2>
+            <div class="muted">模拟盘和实盘可以同时存在。这里配置的是默认实盘总账户 live-main 的交易所 API Key / Secret / Token。</div>
+          </div>
+          <div class="actions">
+            <button onclick="refreshAll()">刷新配置状态</button>
+          </div>
+        </div>
+        <div class="form">
+          <div><label>实盘账户 ID</label><input id="live_account_id" value="live-main"></div>
+          <div><label>启用实盘执行</label><select id="live_enabled"><option value="false">false</option><option value="true">true</option></select></div>
+          <div><label>交易所</label><select id="live_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
+          <div><label>API Key</label><input id="live_api_key" autocomplete="off"></div>
+          <div><label>API Secret</label><input id="live_api_secret" type="password" autocomplete="off"></div>
+          <div><label>Passphrase / UID</label><input id="live_passphrase" type="password" autocomplete="off"></div>
+          <div><label>Access Token</label><input id="live_access_token" type="password" autocomplete="off"></div>
+          <div><label>备注</label><input id="live_note" placeholder="例如：主账户、子账户"></div>
+          <div><label>&nbsp;</label><button class="primary" onclick="saveLiveToken()">保存实盘配置</button></div>
+        </div>
+        <div id="liveConfigResult" class="status">注意：当前 token 保存到运行进程内存，重启后会丢失；后续应加密落地到 Mnesia 或本地密钥文件。</div>
+      </section>
+
+      <section class="panel">
+        <h2>实盘账户状态</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>账户 ID</th><th>模式</th><th>实盘启用</th><th>交易所</th><th>已配置 Token</th><th>开仓执行进程</th><th>平仓执行进程</th></tr></thead>
+            <tbody id="liveAccountRows"></tbody>
+          </table>
+        </div>
       </section>
     </div>
 
     <div id="localDebugView" class="view">
       <section class="panel">
         <h2>本地模拟接口调试</h2>
-        <div class="muted">这里只做本地 dry-run，不向交易所发送请求。真实 API 测试在下方实盘接口测试区。</div>
+        <div class="muted">这里只做本地 dry-run，不向交易所发送请求。</div>
         <div class="form">
           <div><label>交易所</label><select id="debug_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
           <div><label>动作</label><select id="debug_action"><option value="open">开仓</option><option value="close">平仓</option><option value="cancel">撤单</option></select></div>
@@ -156,7 +186,7 @@
           <div><label>名义金额 USDT</label><input id="debug_notional" value="100"></div>
           <div><label>价格</label><input id="debug_price" value="1"></div>
           <div><label>杠杆</label><input id="debug_leverage" value="10"></div>
-          <div><label>平仓/撤单 Order ID</label><input id="debug_order_id" value=""></div>
+          <div><label>平仓/撤单 Order ID</label><input id="debug_order_id"></div>
           <div><label>&nbsp;</label><button class="primary" onclick="debugExchangeOrder()">本地模拟</button></div>
         </div>
         <div id="debugResult" class="status">还没有本地模拟请求。</div>
@@ -166,14 +196,10 @@
 
       <section class="panel">
         <h2>实盘接口测试</h2>
-        <div class="muted">这里用于真实 API 测试。必须启用实盘、保存 API Key/Secret，并在确认框输入 LIVE。</div>
+        <div class="muted">必须先在“实盘配置”页保存 API，再输入 LIVE 才会进入实盘适配器。</div>
         <div class="form">
-          <div><label>交易所</label><select id="live_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
-          <div><label>启用实盘</label><select id="live_enabled"><option value="false">false</option><option value="true">true</option></select></div>
-          <div><label>API Key</label><input id="live_api_key" value=""></div>
-          <div><label>API Secret</label><input id="live_api_secret" type="password" value=""></div>
-          <div><label>Passphrase / UID</label><input id="live_passphrase" type="password" value=""></div>
-          <div><label>&nbsp;</label><button onclick="saveLiveToken()">保存实盘配置</button></div>
+          <div><label>账户 ID</label><input id="test_account_id" value="live-main"></div>
+          <div><label>交易所</label><select id="test_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
           <div><label>动作</label><select id="live_action"><option value="open">开仓</option><option value="close">平仓</option><option value="cancel">撤单</option></select></div>
           <div><label>币种</label><input id="live_symbol" value="BTCUSDT"></div>
           <div><label>方向</label><select id="live_side"><option value="long">做多</option><option value="short">做空</option></select></div>
@@ -182,8 +208,8 @@
           <div><label>价格</label><input id="live_price" value="0"></div>
           <div><label>杠杆</label><input id="live_leverage" value="10"></div>
           <div><label>Reduce Only</label><select id="live_reduce_only"><option value="false">false</option><option value="true">true</option></select></div>
-          <div><label>Client Order ID</label><input id="live_client_order_id" value=""></div>
-          <div><label>确认词</label><input id="live_confirm" value="" placeholder="输入 LIVE 才会进入实盘适配器"></div>
+          <div><label>Client Order ID</label><input id="live_client_order_id"></div>
+          <div><label>确认词</label><input id="live_confirm" placeholder="输入 LIVE"></div>
           <div><label>&nbsp;</label><button class="danger" onclick="liveTestOrder()">真实接口测试</button></div>
         </div>
         <div id="liveTestResult" class="status">还没有实盘测试请求。</div>

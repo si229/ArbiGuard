@@ -186,9 +186,11 @@ live_state() ->
         [] -> #{}
     end,
     ExchangeAccounts = maps:get(exchange_accounts, Live, #{}),
+    TokenConfigured = maps:get(token_configured_exchanges, Live, []),
     #{enabled => maps:get(live_enabled, Live, false),
       account_id => maps:get(id, Live, <<"live-main">>),
-      token_exchanges => maps:keys(ExchangeAccounts),
+      exchange_accounts => maps:keys(ExchangeAccounts),
+      token_configured_exchanges => TokenConfigured,
       accounts => List,
       orders => [],
       balances => #{},

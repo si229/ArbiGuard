@@ -1,6 +1,6 @@
 -module(arbiguard_live_adapter).
 
--export([test_order/2]).
+-export([test_order/2, account_snapshot/3]).
 
 test_order(Payload, TokenConfig) ->
     Exchange = norm_exchange(maps:get(exchange, Payload, <<"">>)),
@@ -10,6 +10,29 @@ test_order(Payload, TokenConfig) ->
         Error ->
             Error
     end.
+
+account_snapshot(Exchange, ExchangeConfig, TokenConfig) ->
+    ExchangeID = norm_exchange(maps:get(id, ExchangeConfig, Exchange)),
+    case has_token(TokenConfig) of
+        false ->
+            #{ok => false,
+              exchange => ExchangeID,
+              reason => <<"live_token_not_configured">>,
+              balances => #{},
+              positions => [],
+              orders => []};
+        true ->
+            account_snapshot_dispatch(ExchangeID, ExchangeConfig, TokenConfig)
+    end.
+
+account_snapshot_dispatch(ExchangeID, _ExchangeConfig, _TokenConfig) ->
+    #{ok => false,
+      exchange => ExchangeID,
+      reason => <<"live_snapshot_not_implemented">>,
+      detail => <<"Signed REST account snapshot is not implemented for this exchange yet.">>,
+      balances => #{},
+      positions => [],
+      orders => []}.
 
 dispatch_test_order(Exchange, _Payload, _TokenConfig) ->
     #{ok => false,
