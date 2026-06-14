@@ -84,9 +84,6 @@ function payload() {
     "paper_leverage",
     "max_open_positions",
     "max_position_pct",
-    "min_funding_rate",
-    "min_price_gap_rate",
-    "max_basis_rate",
     "min_execution_profit_usdt",
     "limit"
   ];

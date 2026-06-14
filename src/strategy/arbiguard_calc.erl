@@ -13,9 +13,6 @@ normalize_request(Req0) ->
         max_position_pct => f(maps:get(max_position_pct, Req1, 0.1), 0.1),
         max_open_positions => max(0, arbiguard_util:to_int(maps:get(max_open_positions, Req1, 5), 5)),
         execution_notional_usdt => f(maps:get(execution_notional_usdt, Req1, 200), 200),
-        min_funding_rate => f(maps:get(min_funding_rate, Req1, 0.0003), 0.0003),
-        min_price_gap_rate => f(maps:get(min_price_gap_rate, Req1, 0.002), 0.002),
-        max_basis_rate => f(maps:get(max_basis_rate, Req1, 0.02), 0.02),
         min_quote_volume => f(maps:get(min_quote_volume, Req1, 0), 0),
         execution_window_sec => f(maps:get(execution_window_sec, Req1, 60), 60),
         fast_refresh_sec => f(maps:get(fast_refresh_sec, Req1, 1), 1),
@@ -89,24 +86,17 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
                     true -> {f(maps:get(funding_rate, ShortLeg, 0), 0), <<"pre_settlement_short_funding">>};
                     false -> {FundingEdge0, <<"funding_rate_spread">>}
                 end,
-            MinFunding = f(maps:get(min_funding_rate, Req, 0.0003), 0.0003),
-            MinGap = f(maps:get(min_price_gap_rate, Req, 0.002), 0.002),
-            case (FundingEdge >= MinFunding) orelse (abs(PriceGap) >= MinGap) of
+            LongGrossFeeRate = f(maps:get(taker_fee_rate, LongLeg, 0.0005), 0.0005),
+            ShortGrossFeeRate = f(maps:get(taker_fee_rate, ShortLeg, 0.0005), 0.0005),
+            LongFeeRate = effective_fee_rate(LongLeg),
+            ShortFeeRate = effective_fee_rate(ShortLeg),
+            OpenFeeRate = LongFeeRate + ShortFeeRate,
+            RoundTripFeeRate = OpenFeeRate * 2,
+            ExpectedNetReturn = FundingEdge + PriceGap - RoundTripFeeRate,
+            case ExpectedNetReturn > 0 of
                 false -> false;
                 true ->
-                    LongGrossFeeRate = f(maps:get(taker_fee_rate, LongLeg, 0.0005), 0.0005),
-                    ShortGrossFeeRate = f(maps:get(taker_fee_rate, ShortLeg, 0.0005), 0.0005),
-                    LongFeeRate = effective_fee_rate(LongLeg),
-                    ShortFeeRate = effective_fee_rate(ShortLeg),
-                    OpenFeeRate = LongFeeRate + ShortFeeRate,
-                    RoundTripFeeRate = OpenFeeRate * 2,
-                    ExpectedNetReturn = FundingEdge + PriceGap - RoundTripFeeRate,
-                    ExecutionBasisOK = abs(PriceGap) =< f(maps:get(max_basis_rate, Req, 0.02), 0.02),
-                    case ExpectedNetReturn > 0 of
-                        false -> false;
-                        true when not ExecutionBasisOK -> false;
-                        true ->
-                            Type = classify(FundingEdge, PriceGap, MinFunding, MinGap),
+                            Type = classify(FundingEdge, PriceGap, 0.0, 0.0),
                             Method = method(Type, Method0),
                             EstimatedFunding = Notional * FundingEdge,
                             RoundTripFee = Notional * RoundTripFeeRate,
@@ -155,7 +145,6 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
                               in_execution_window => SecondsToFunding > 0 andalso SecondsToFunding =< f(maps:get(execution_window_sec, Req, 60), 60),
                               recommended_timing => timing(SecondsToFunding, f(maps:get(execution_window_sec, Req, 60), 60)),
                               risk_level => risk(ExpectedNetReturn, PriceGap, BreakEven)}
-                    end
             end
     end.
 
@@ -165,13 +154,11 @@ valid_legs(Req, LongLeg, ShortLeg) ->
     LongPrice = f(maps:get(mark_price, LongLeg, 0), 0),
     ShortPrice = f(maps:get(mark_price, ShortLeg, 0), 0),
     MinVol = f(maps:get(min_quote_volume, Req, 0), 0),
-    MaxBasis = f(maps:get(max_basis_rate, Req, 0.02), 0.02),
     Same = LongEx =:= ShortEx,
     VolOK = (f(maps:get(quote_volume, LongLeg, 0), 0) =:= 0 orelse f(maps:get(quote_volume, LongLeg, 0), 0) >= MinVol) andalso
             (f(maps:get(quote_volume, ShortLeg, 0), 0) =:= 0 orelse f(maps:get(quote_volume, ShortLeg, 0), 0) >= MinVol),
     Mid = case LongPrice > 0 andalso ShortPrice > 0 of true -> (LongPrice + ShortPrice) / 2; false -> 0 end,
-    BasisOK = Mid > 0 andalso abs((ShortPrice - LongPrice) / Mid) =< MaxBasis,
-    (not Same) andalso LongPrice > 0 andalso ShortPrice > 0 andalso VolOK andalso BasisOK andalso
+    (not Same) andalso LongPrice > 0 andalso ShortPrice > 0 andalso VolOK andalso Mid > 0 andalso
         short_cycle_positive(LongLeg, ShortLeg) andalso (not delist_risk(LongLeg)) andalso (not delist_risk(ShortLeg)).
 
 executable_open_price(long, Leg) ->
@@ -229,9 +216,9 @@ can_collect_short_before_long(LongLeg, ShortLeg) ->
     L = maps:get(next_funding_time, LongLeg, 0),
     S > 0 andalso L > 0 andalso S + 60000 < L.
 
-classify(FundingEdge, PriceGap, MinFunding, MinGap) ->
-    HasFunding = FundingEdge >= MinFunding,
-    HasGap = abs(PriceGap) >= MinGap,
+classify(FundingEdge, PriceGap, _MinFunding, _MinGap) ->
+    HasFunding = FundingEdge > 0,
+    HasGap = PriceGap > 0,
     case {HasFunding, HasGap} of
         {true, true} -> <<"funding_and_price_gap">>;
         {false, true} -> <<"price_gap">>;

@@ -699,19 +699,15 @@ next_settlement_return(Op) ->
 
 require_profitable(Op, Req) ->
     MinProfit = maps:get(min_execution_profit_usdt, Req, 10.0),
-    MaxBasis = maps:get(max_basis_rate, Req, 0.02),
     Profit = maps:get(estimated_net_profit, Op, 0.0),
-    Basis = abs(maps:get(price_gap_return, Op, 0.0)),
-    case Profit >= MinProfit andalso Basis =< MaxBasis of
+    case Profit >= MinProfit of
         true -> {ok, Op};
         false ->
-            Reason = case Basis > MaxBasis of
-                true -> <<"basis_too_wide_after_ws_price">>;
-                false -> <<"profit_below_threshold_after_ws_price">>
-            end,
-            lager:info("open executor wait rejected_after_ws symbol=~s reason=~s profit=~p min=~p basis=~p max_basis=~p pre_profit=~p",
-                       [maps:get(symbol, Op, <<"">>), Reason, Profit, MinProfit, Basis, MaxBasis,
-                        maps:get(pre_ws_estimated_net_profit, Op, 0.0)]),
+            Reason = <<"profit_below_threshold_after_ws_price">>,
+            lager:info("open executor wait rejected_after_ws symbol=~s reason=~s profit=~p min=~p pre_profit=~p price_gap=~p",
+                       [maps:get(symbol, Op, <<"">>), Reason, Profit, MinProfit,
+                        maps:get(pre_ws_estimated_net_profit, Op, 0.0),
+                        maps:get(price_gap_return, Op, 0.0)]),
             {wait, #{reason => Reason,
                      symbol => maps:get(symbol, Op, <<"">>),
                      estimated_net_profit => Profit,
@@ -720,7 +716,6 @@ require_profitable(Op, Req) ->
                      long_price => maps:get(long_price, Op, 0.0),
                      short_price => maps:get(short_price, Op, 0.0),
                      price_gap_return => maps:get(price_gap_return, Op, 0.0),
-                     max_basis_rate => MaxBasis,
                      funding_edge_return => maps:get(funding_edge_return, Op, 0.0)}}
     end.
 
