@@ -2,6 +2,9 @@ let lastState = {};
 let lastLive = {};
 let logTab = "trades";
 let tradePage = {page: 1, page_size: 50, total: 0, total_pages: 0, trades: []};
+let liveConfigDirty = false;
+let liveConfigDraft = [];
+const knownExchanges = ["binance", "gate", "okx", "htx", "weex"];
 
 const $ = id => document.getElementById(id);
 const num = v => Number(v || 0);
@@ -214,7 +217,7 @@ function renderPositions(state) {
 
 function renderLiveAccounts(live) {
   const accounts = live.accounts || [];
-  renderLiveExchanges(live);
+  renderLiveExchangeConfig(live);
   renderAccountSelects(accounts, live.account_id || "live-main");
   $("liveAccountRows").innerHTML = accounts.map(a => {
     const exchanges = a.exchanges || Object.keys(a.exchange_accounts || {});
@@ -270,6 +273,83 @@ function renderLiveExchanges(live) {
       <td>${esc(st.last_sync_error || st.error || "-")}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="8">这个总账户还没有添加交易所。先选择交易所并保存 API 配置。</td></tr>`;
+}
+
+function renderLiveExchangeConfig(live) {
+  if (liveConfigDirty) return;
+  const accountId = $("live_account_id")?.value || live.account_id || "live-main";
+  const account = (live.accounts || []).find(a => a.id === accountId) || (live.accounts || []).find(a => a.id === (live.account_id || "live-main")) || {};
+  const exchangeAccounts = account.exchange_accounts || {};
+  const configured = new Set(account.token_configured_exchanges || live.token_configured_exchanges || []);
+  const states = {};
+  (live.exchange_states || []).forEach(s => { states[s.exchange] = s; });
+  const ids = [...new Set([
+    ...Object.keys(exchangeAccounts),
+    ...Array.from(configured),
+    ...(live.exchange_accounts || [])
+  ])].sort();
+  liveConfigDraft = ids.map(id => ({
+    exchange: id,
+    configured: configured.has(id),
+    info: exchangeAccounts[id] || {},
+    state: states[id] || {},
+    deleted: false,
+    isNew: false
+  }));
+  renderLiveConfigDraft();
+}
+
+function exchangeOptions(selected) {
+  return knownExchanges.map(id => `<option value="${esc(id)}"${id === selected ? " selected" : ""}>${esc(id)}</option>`).join("");
+}
+
+function renderLiveConfigDraft() {
+  const el = $("liveExchangeConfigRows");
+  if (!el) return;
+  el.innerHTML = liveConfigDraft.map((row, i) => {
+    const st = row.state || {};
+    const info = row.info || {};
+    const disabled = row.deleted ? " disabled" : "";
+    const trCls = row.deleted ? " class=\"muted\"" : "";
+    return `<tr data-index="${i}" data-configured="${row.configured ? "true" : "false"}" data-deleted="${row.deleted ? "true" : "false"}"${trCls}>
+      <td><select class="live-row-exchange" onchange="markLiveConfigDirty()"${disabled}>${exchangeOptions(row.exchange)}</select></td>
+      <td><input class="live-row-api-key" autocomplete="off" placeholder="${row.configured ? "已保存，修改时重填" : ""}"${disabled}></td>
+      <td><input class="live-row-api-secret" type="password" autocomplete="off" placeholder="${row.configured ? "已保存，修改时重填" : ""}"${disabled}></td>
+      <td><input class="live-row-passphrase" type="password" autocomplete="off"${disabled}></td>
+      <td><input class="live-row-access-token" type="password" autocomplete="off"${disabled}></td>
+      <td><input class="live-row-note" value="${esc(row.note || "")}" onchange="markLiveConfigDirty()"${disabled}></td>
+      <td class="${row.configured ? "pos" : "warn"}">${row.configured ? "yes" : "no"}</td>
+      <td>${esc(info.account_process || "-")}</td>
+      <td>${esc(info.private_ws || "-")}</td>
+      <td>${esc(st.last_sync_status || "-")}</td>
+      <td>${esc(timeMs(st.last_sync_at))}</td>
+      <td>${esc(st.last_sync_error || st.error || "-")}</td>
+      <td><button onclick="removeLiveExchangeRow(${i})">${row.deleted ? "撤销" : "删除"}</button></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="13">暂无交易所配置。</td></tr>`;
+  el.querySelectorAll("input,select").forEach(x => x.addEventListener("input", markLiveConfigDirty));
+}
+
+function markLiveConfigDirty() {
+  liveConfigDirty = true;
+}
+
+function addLiveExchangeRow() {
+  liveConfigDirty = true;
+  liveConfigDraft.push({exchange: "binance", configured: false, info: {}, state: {}, deleted: false, isNew: true});
+  renderLiveConfigDraft();
+}
+
+function removeLiveExchangeRow(index) {
+  liveConfigDirty = true;
+  const row = liveConfigDraft[index];
+  if (!row) return;
+  if (row.isNew && !row.configured) {
+    liveConfigDraft.splice(index, 1);
+  } else {
+    row.deleted = !row.deleted;
+  }
+  renderLiveConfigDraft();
 }
 
 function setLogTab(tab) {
@@ -429,6 +509,59 @@ async function saveLiveToken() {
     $("liveConfigResult").textContent = `保存实盘配置失败：${e.message}`;
   }
 }
+
+async function saveLiveConfigRows() {
+  try {
+    const account_id = $("live_account_id").value || "live-main";
+    const enabled = $("live_enabled").value === "true";
+    await api("/api/live/enabled", {method: "POST", body: JSON.stringify({account_id, enabled})});
+    const rows = Array.from(document.querySelectorAll("#liveExchangeConfigRows tr[data-index]"));
+    let saved = 0;
+    let deleted = 0;
+    let skipped = 0;
+    const seen = new Set();
+    for (const row of rows) {
+      const exchange = row.querySelector(".live-row-exchange")?.value || "";
+      if (!exchange || seen.has(exchange)) {
+        skipped += 1;
+        continue;
+      }
+      seen.add(exchange);
+      const configured = row.dataset.configured === "true";
+      const isDeleted = row.dataset.deleted === "true";
+      if (isDeleted) {
+        if (configured) {
+          await api("/api/live/token/delete", {method: "POST", body: JSON.stringify({account_id, exchange})});
+          deleted += 1;
+        }
+        continue;
+      }
+      const token = {
+        account_id,
+        exchange,
+        api_key: row.querySelector(".live-row-api-key")?.value || "",
+        api_secret: row.querySelector(".live-row-api-secret")?.value || "",
+        passphrase: row.querySelector(".live-row-passphrase")?.value || "",
+        access_token: row.querySelector(".live-row-access-token")?.value || "",
+        note: row.querySelector(".live-row-note")?.value || ""
+      };
+      const hasAuth = token.api_key.trim() && token.api_secret.trim();
+      if (hasAuth) {
+        await api("/api/live/token", {method: "POST", body: JSON.stringify(token)});
+        saved += 1;
+      } else if (!configured) {
+        skipped += 1;
+      }
+    }
+    liveConfigDirty = false;
+    $("liveConfigResult").textContent = `已保存：新增/修改 ${saved} 个，删除 ${deleted} 个，跳过 ${skipped} 个，实盘启用=${enabled}。`;
+    await refreshAll();
+  } catch (e) {
+    $("liveConfigResult").textContent = `保存实盘配置失败：${e.message}`;
+  }
+}
+
+saveLiveToken = saveLiveConfigRows;
 
 async function syncLiveAccount() {
   try {

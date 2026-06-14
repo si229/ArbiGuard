@@ -5,6 +5,7 @@
          open_executor/1, close_executor/1,
          track_position/2, report_order_event/3,
          report_funding_settlement/3, set_live_enabled/2, set_exchange_token/3,
+         delete_exchange_token/2,
          get_exchange_token/2, exchange_snapshot_synced/3, sync_account/1, test_order/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -49,6 +50,9 @@ set_live_enabled(AccountID, Enabled) ->
 
 set_exchange_token(AccountID, ExchangeID, Token) ->
     gen_server:call(?MODULE, {set_exchange_token, AccountID, ExchangeID, Token}).
+
+delete_exchange_token(AccountID, ExchangeID) ->
+    gen_server:call(?MODULE, {delete_exchange_token, AccountID, ExchangeID}).
 
 get_exchange_token(AccountID, ExchangeID) ->
     case account(AccountID) of
@@ -120,6 +124,27 @@ handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State 
              State#state{accounts = Accounts1#{AccountID => Account1}}};
         {error, Reason} ->
             {reply, #{ok => false, reason => Reason, account_id => AccountID, exchange => ExchangeID}, State}
+    end;
+handle_call({delete_exchange_token, AccountID0, ExchangeID0}, _From, State = #state{accounts = Accounts}) ->
+    AccountID = norm_account_id(AccountID0),
+    ExchangeID = norm_exchange(ExchangeID0),
+    case maps:get(AccountID, Accounts, undefined) of
+        undefined ->
+            {reply, #{ok => false, reason => <<"account_not_found">>, account_id => AccountID, exchange => ExchangeID}, State};
+        Account ->
+            catch arbiguard_exchange_account:set_token(AccountID, ExchangeID, undefined),
+            catch arbiguard_private_ws:refresh_auth(AccountID, ExchangeID),
+            Tokens = maps:remove(ExchangeID, maps:get(exchange_tokens, Account, #{})),
+            ExchangeAccounts = maps:remove(ExchangeID, maps:get(exchange_accounts, Account, #{})),
+            Exchanges = [E || E <- maps:get(exchanges, Account, []), E =/= ExchangeID],
+            Snapshots = maps:remove(ExchangeID, maps:get(exchange_snapshots, Account, #{})),
+            Account1 = Account#{exchange_tokens => Tokens,
+                                exchange_accounts => ExchangeAccounts,
+                                exchanges => Exchanges,
+                                exchange_snapshots => Snapshots},
+            broadcast_executor_meta(Account1),
+            {reply, #{ok => true, account_id => AccountID, exchange => ExchangeID, status => <<"deleted">>},
+             State#state{accounts = Accounts#{AccountID => Account1}}}
     end;
 handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) ->
     Payload = normalize_test_payload(Payload0),

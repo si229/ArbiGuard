@@ -143,9 +143,10 @@
         <div class="top">
           <div>
             <h2>实盘账户配置</h2>
-            <div class="muted">模拟盘和实盘可以同时存在。这里配置的是默认实盘总账户 live-main 的交易所 API Key / Secret / Token。</div>
           </div>
           <div class="actions">
+            <button onclick="addLiveExchangeRow()">添加交易所</button>
+            <button class="primary" onclick="saveLiveConfigRows()">保存配置</button>
             <button onclick="refreshAll()">刷新配置状态</button>
             <button onclick="syncLiveAccount()">同步账户状态</button>
           </div>
@@ -153,24 +154,12 @@
         <div class="form">
           <div><label>实盘账户 ID</label><input id="live_account_id" value="live-main"></div>
           <div><label>启用实盘执行</label><select id="live_enabled"><option value="false">false</option><option value="true">true</option></select></div>
-          <div><label>交易所</label><select id="live_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
-          <div><label>API Key</label><input id="live_api_key" autocomplete="off"></div>
-          <div><label>API Secret</label><input id="live_api_secret" type="password" autocomplete="off"></div>
-          <div><label>Passphrase / UID</label><input id="live_passphrase" type="password" autocomplete="off"></div>
-          <div><label>Access Token</label><input id="live_access_token" type="password" autocomplete="off"></div>
-          <div><label>备注</label><input id="live_note" placeholder="例如：主账户、子账户"></div>
-          <div><label>&nbsp;</label><button class="primary" onclick="saveLiveToken()">保存实盘配置</button></div>
         </div>
-        <div id="liveConfigResult" class="status">注意：当前 token 保存到运行进程内存，重启后会丢失；后续应加密落地到 Mnesia 或本地密钥文件。</div>
-        <div class="muted note">同一个实盘总账户可以添加多个交易所。选择交易所后保存，只会新增或更新这个交易所的 token，不会删除其它交易所配置。</div>
-      </section>
-
-      <section class="panel">
-        <h2>总账户交易所配置</h2>
+        <div id="liveConfigResult" class="status">待配置。</div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>账户 ID</th><th>交易所</th><th>已配置 Token</th><th>账户进程</th><th>私有 WS</th><th>同步状态</th><th>最近同步</th><th>错误</th></tr></thead>
-            <tbody id="liveExchangeRows"></tbody>
+            <thead><tr><th>交易所</th><th>API Key</th><th>API Secret</th><th>Passphrase / UID</th><th>Access Token</th><th>备注</th><th>已配置</th><th>账户进程</th><th>私有 WS</th><th>同步状态</th><th>最近同步</th><th>错误</th><th>操作</th></tr></thead>
+            <tbody id="liveExchangeConfigRows"></tbody>
           </table>
         </div>
       </section>
@@ -188,8 +177,7 @@
 
     <div id="localDebugView" class="view">
       <section class="panel">
-        <h2>本地模拟接口调试</h2>
-        <div class="muted">这里只做本地 dry-run，不向交易所发送请求；会读取所选总账户中已配置的交易所 API / Token 做权限和参数校验。</div>
+        <h2>实盘接口测试</h2>
         <div class="form">
           <div><label>总账户</label><select id="debug_account_id"><option value="live-main">live-main</option></select></div>
           <div><label>交易所</label><select id="debug_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
@@ -200,18 +188,18 @@
           <div><label>价格</label><input id="debug_price" value="1"></div>
           <div><label>杠杆</label><input id="debug_leverage" value="10"></div>
           <div><label>平仓/撤单 Order ID</label><input id="debug_order_id"></div>
-          <div><label>&nbsp;</label><button class="primary" onclick="debugExchangeOrder()">本地模拟</button></div>
+          <div><label>&nbsp;</label><button class="primary" onclick="debugExchangeOrder()">读取配置校验</button></div>
         </div>
-        <div id="debugResult" class="status">还没有本地模拟请求。</div>
+        <div id="debugResult" class="status">还没有配置校验请求。</div>
         <div class="table-wrap"><table><thead><tr><th>交易所</th><th>调试余额</th></tr></thead><tbody id="debugBalanceRows"></tbody></table></div>
         <div class="table-wrap"><table><thead><tr><th>ID</th><th>交易所</th><th>币种</th><th>方向</th><th>名义仓位</th><th>数量</th><th>开仓价</th><th>保证金</th><th>手续费</th><th>开仓时间</th></tr></thead><tbody id="debugPositionRows"></tbody></table></div>
       </section>
 
       <section class="panel">
-        <h2>实盘接口测试</h2>
+        <h2>真实下单测试</h2>
         <div class="muted">必须先在“实盘配置”页保存 API，再输入 LIVE 才会进入实盘适配器。</div>
         <div class="form">
-          <div><label>账户 ID</label><input id="test_account_id" value="live-main"></div>
+          <div><label>总账户</label><select id="test_account_id"><option value="live-main">live-main</option></select></div>
           <div><label>交易所</label><select id="test_exchange"><option>binance</option><option>gate</option><option>okx</option><option>htx</option><option>weex</option></select></div>
           <div><label>动作</label><select id="live_action"><option value="open">开仓</option><option value="close">平仓</option><option value="cancel">撤单</option></select></div>
           <div><label>币种</label><input id="live_symbol" value="BTCUSDT"></div>

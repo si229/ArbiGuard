@@ -154,6 +154,11 @@ route(#{method := <<"POST">>, path := <<"/api/live/token">>, body := Body}) ->
     AccountID = maps:get(account_id, Payload, <<"live-main">>),
     Token = maps:remove(exchange, Payload),
     json_response(200, arbiguard_account_manager:set_exchange_token(AccountID, Exchange, Token));
+route(#{method := <<"POST">>, path := <<"/api/live/token/delete">>, body := Body}) ->
+    Payload = safe_decode(Body),
+    Exchange = maps:get(exchange, Payload, <<"">>),
+    AccountID = maps:get(account_id, Payload, <<"live-main">>),
+    json_response(200, arbiguard_account_manager:delete_exchange_token(AccountID, Exchange));
 route(#{method := <<"POST">>, path := <<"/api/live/sync">>, body := Body}) ->
     Payload = safe_decode(Body),
     AccountID = maps:get(account_id, Payload, <<"live-main">>),
