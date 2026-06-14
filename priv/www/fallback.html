@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ArbiGuard fallback</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header>
+    <h1>ArbiGuard</h1>
+    <div class="sub">备用页面</div>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>主页面未加载</h2>
+      <p class="muted">服务没有读到 <code>priv/www/index.html</code>，请检查 release 是否包含 web 文件。</p>
+      <div class="actions">
+        <button class="primary" onclick="location.reload()">刷新</button>
+        <button onclick="fetch('/api/health').then(r=>r.json()).then(x=>document.getElementById('health').textContent=JSON.stringify(x))">检查服务</button>
+      </div>
+      <pre id="health" class="status">等待检查。</pre>
+    </section>
+  </main>
+</body>
+</html>

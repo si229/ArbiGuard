@@ -43,10 +43,10 @@ reset(Executor) ->
     gen_server:call(Executor, reset).
 
 snapshot() ->
-    gen_server:call(?MODULE, snapshot).
+    gen_server:call(?MODULE, snapshot, 800).
 
 snapshot(Executor) ->
-    gen_server:call(Executor, snapshot).
+    gen_server:call(Executor, snapshot, 800).
 
 init([]) ->
     schedule_opportunity_poll(),
