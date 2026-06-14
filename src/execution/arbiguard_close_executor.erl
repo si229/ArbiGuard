@@ -1,27 +1,52 @@
 -module(arbiguard_close_executor).
 -behaviour(gen_server).
 
--export([start_link/0, track_position/2, reset/0, snapshot/0]).
+-export([start_link/0, start_link/1, account_name/1,
+         track_position/2, track_position/3, reset/0, reset/1, snapshot/0, snapshot/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {orders = #{}, last_submit = 0, ticker_cache = #{}}).
+-record(state, {account_id = <<"paper-main">>, account_mode = <<"paper">>,
+                orders = #{}, last_submit = 0, ticker_cache = #{}}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+start_link(Config) ->
+    AccountID = maps:get(account_id, Config, <<"paper-main">>),
+    Name = maps:get(name, Config, account_name(AccountID)),
+    gen_server:start_link({local, Name}, ?MODULE, [Config], []).
+
+account_name(AccountID) ->
+    list_to_atom("arbiguard_close_executor_" ++ safe_atom_part(AccountID)).
+
 track_position(Req, Position) ->
     gen_server:call(?MODULE, {track_position, Req, Position}).
+
+track_position(Executor, Req, Position) ->
+    gen_server:call(Executor, {track_position, Req, Position}).
 
 reset() ->
     gen_server:call(?MODULE, reset).
 
+reset(Executor) ->
+    gen_server:call(Executor, reset).
+
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
 
-init([]) ->
-    {ok, #state{}}.
+snapshot(Executor) ->
+    gen_server:call(Executor, snapshot).
 
-handle_call({track_position, Req, Position}, _From, State = #state{orders = Orders}) ->
+init([]) ->
+    {ok, #state{}};
+init([Config]) ->
+    {ok, #state{account_id = maps:get(account_id, Config, <<"paper-main">>),
+                account_mode = maps:get(account_mode, Config, <<"paper">>)}}.
+
+handle_call({track_position, Req0, Position0}, _From, State = #state{orders = Orders}) ->
+    Req = with_state_account(arbiguard_calc:normalize_request(Req0), State),
+    Position = Position0#{account_id => maps:get(account_id, Req),
+                          account_mode => maps:get(account_mode, Req)},
     Order = tracking_plan(Req, Position),
     subscribe_position_symbols(Position),
     NewOrder = Order#{status => <<"tracking_position">>, req => Req, position => Position},
@@ -36,7 +61,9 @@ handle_call(reset, _From, State = #state{orders = Orders}) ->
     {reply, #{ok => true, cleared_close_orders => maps:size(Orders)},
      State#state{orders = #{}, last_submit = 0, ticker_cache = #{}}};
 handle_call(snapshot, _From, State) ->
-    {reply, #{orders => [public_order(O) || O <- maps:values(State#state.orders)],
+    {reply, #{account_id => State#state.account_id,
+              account_mode => State#state.account_mode,
+              orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_submit => State#state.last_submit,
               ticker_cache_size => maps:size(State#state.ticker_cache)}, State};
 handle_call(_Req, _From, State) ->
@@ -774,3 +801,11 @@ size_key(bid) -> bid_size.
 
 safe_div(_A, B) when B =< 0 -> 0.0;
 safe_div(A, B) -> A / B.
+
+with_state_account(Req, State) ->
+    Req#{account_id => maps:get(account_id, Req, State#state.account_id),
+         account_mode => maps:get(account_mode, Req, State#state.account_mode)}.
+
+safe_atom_part(V) ->
+    S = binary_to_list(string:lowercase(arbiguard_util:to_binary(V))),
+    [case ((C >= $a andalso C =< $z) orelse (C >= $0 andalso C =< $9)) of true -> C; false -> $_ end || C <- S].

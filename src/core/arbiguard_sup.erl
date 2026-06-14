@@ -38,7 +38,13 @@ init([]) ->
           restart => permanent,
           shutdown => 5000,
           type => worker,
-          modules => [arbiguard_close_executor]}
+          modules => [arbiguard_close_executor]},
+        #{id => arbiguard_account_manager,
+          start => {arbiguard_account_manager, start_link, []},
+          restart => permanent,
+          shutdown => 5000,
+          type => worker,
+          modules => [arbiguard_account_manager]}
     ],
     TailChildren = [
         #{id => arbiguard_symbol_watcher,

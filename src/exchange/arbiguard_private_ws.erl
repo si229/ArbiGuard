@@ -1,20 +1,27 @@
 -module(arbiguard_private_ws).
 -behaviour(gen_server).
 
--export([start_link/1, snapshot/1, name/1, inject_event/2]).
+-export([start_link/1, start_link/2, snapshot/1, snapshot/2, name/1, name/2, inject_event/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {exchange, id, ws_enabled = false, ws_connected = false,
+-record(state, {account_id = <<"live-main">>, exchange, id, ws_enabled = false, ws_connected = false,
                 ws_status = <<"stopped">>, ws_error = undefined,
                 ws_conn = undefined, ws_stream = undefined, heartbeat_ref = undefined,
                 logged_in = false, subscribed = false, last_event = undefined, last_event_at = 0}).
 
 start_link(Exchange) ->
     ID = maps:get(id, Exchange),
-    gen_server:start_link({local, name(ID)}, ?MODULE, [Exchange], []).
+    gen_server:start_link({local, name(ID)}, ?MODULE, [<<"live-main">>, Exchange], []).
+
+start_link(AccountID, Exchange) ->
+    ID = maps:get(id, Exchange),
+    gen_server:start_link({local, name(AccountID, ID)}, ?MODULE, [AccountID, Exchange], []).
 
 snapshot(ExchangeID) ->
     gen_server:call(name(ExchangeID), snapshot).
+
+snapshot(AccountID, ExchangeID) ->
+    gen_server:call(name(AccountID, ExchangeID), snapshot).
 
 inject_event(ExchangeID, Event) ->
     gen_server:cast(name(ExchangeID), {inject_event, Event}).
@@ -22,17 +29,21 @@ inject_event(ExchangeID, Event) ->
 name(ExchangeID) ->
     list_to_atom("arbiguard_private_ws_" ++ binary_to_list(string:lowercase(arbiguard_util:to_binary(ExchangeID)))).
 
-init([Exchange]) ->
+name(AccountID, ExchangeID) ->
+    list_to_atom("arbiguard_private_ws_" ++ safe_atom_part(AccountID) ++ "_" ++ safe_atom_part(ExchangeID)).
+
+init([AccountID, Exchange]) ->
     ID = maps:get(id, Exchange),
     case application:get_env(arbiguard, private_ws_enabled, true) of
         true -> self() ! start_ws;
         false -> ok
     end,
-    {ok, #state{exchange = Exchange, id = ID}}.
+    {ok, #state{account_id = arbiguard_util:to_binary(AccountID), exchange = Exchange, id = ID}}.
 
 handle_call(snapshot, _From, State) ->
     {Host, Port, Path, URL} = ws_endpoint_info(State),
     {reply, #{exchange => State#state.id,
+              account_id => State#state.account_id,
               ws_enabled => State#state.ws_enabled,
               ws_connected => State#state.ws_connected,
               ws_status => State#state.ws_status,
@@ -128,7 +139,9 @@ await_ws_upgrade(State, ConnPid, StreamRef, Host, Path) ->
     end.
 
 login_and_subscribe(State) ->
-    case arbiguard_live_account:get_exchange_token(State#state.id) of
+    Token0 = arbiguard_exchange_account:get_token(State#state.account_id, State#state.id),
+    Token1 = case Token0 of undefined -> arbiguard_live_account:get_exchange_token(State#state.id); _ -> Token0 end,
+    case Token1 of
         undefined ->
             State#state{ws_status = <<"waiting_token">>, ws_error = <<"live_token_not_configured">>};
         Token ->
@@ -176,24 +189,39 @@ handle_ws_payload(Data, State) ->
 
 dispatch_private_event(Msg, State) ->
     Events = normalize_private_events(State#state.id, Msg),
-    [dispatch_normalized_event(State#state.id, Event) || Event <- Events],
+    [dispatch_normalized_event(State#state.account_id, State#state.id, Event) || Event <- Events],
     case Events of
         [] -> State;
         _ -> State#state{last_event = lists:last(Events), last_event_at = arbiguard_util:now_ms()}
     end.
 
-dispatch_normalized_event(ExchangeID, #{event_type := order} = Event) ->
-    arbiguard_live_account:report_order_event(ExchangeID, Event);
-dispatch_normalized_event(ExchangeID, #{event_type := balance} = Event) ->
-    arbiguard_live_account:report_balance(ExchangeID, Event);
-dispatch_normalized_event(ExchangeID, #{event_type := position} = Event) ->
-    arbiguard_live_account:report_position(ExchangeID, Event);
-dispatch_normalized_event(ExchangeID, #{event_type := funding} = Event) ->
+dispatch_normalized_event(AccountID, ExchangeID, #{event_type := order} = Event) ->
+    case arbiguard_exchange_account:report_order_event(AccountID, ExchangeID, Event) of
+        {error, exchange_account_not_found} -> arbiguard_live_account:report_order_event(ExchangeID, Event);
+        _ -> ok
+    end;
+dispatch_normalized_event(AccountID, ExchangeID, #{event_type := balance} = Event) ->
+    case arbiguard_exchange_account:report_balance(AccountID, ExchangeID, Event) of
+        {error, exchange_account_not_found} -> arbiguard_live_account:report_balance(ExchangeID, Event);
+        _ -> ok
+    end;
+dispatch_normalized_event(AccountID, ExchangeID, #{event_type := position} = Event) ->
+    case arbiguard_exchange_account:report_position(AccountID, ExchangeID, Event) of
+        {error, exchange_account_not_found} -> arbiguard_live_account:report_position(ExchangeID, Event);
+        _ -> ok
+    end;
+dispatch_normalized_event(AccountID, ExchangeID, #{event_type := funding} = Event) ->
     PositionID = maps:get(position_id, Event, <<"">>),
-    arbiguard_live_account:report_funding_settlement(PositionID, Event#{exchange => ExchangeID});
-dispatch_normalized_event(ExchangeID, #{event_type := liquidation} = Event) ->
-    arbiguard_live_account:report_liquidation(ExchangeID, Event);
-dispatch_normalized_event(_ExchangeID, _Event) ->
+    case arbiguard_exchange_account:report_funding_settlement(AccountID, ExchangeID, Event#{exchange => ExchangeID}) of
+        {error, exchange_account_not_found} -> arbiguard_live_account:report_funding_settlement(PositionID, Event#{exchange => ExchangeID});
+        _ -> ok
+    end;
+dispatch_normalized_event(AccountID, ExchangeID, #{event_type := liquidation} = Event) ->
+    case arbiguard_exchange_account:report_liquidation(AccountID, ExchangeID, Event) of
+        {error, exchange_account_not_found} -> arbiguard_live_account:report_liquidation(ExchangeID, Event);
+        _ -> ok
+    end;
+dispatch_normalized_event(_AccountID, _ExchangeID, _Event) ->
     ok.
 
 normalize_private_events(ID, Msg) ->
@@ -370,3 +398,7 @@ normalize_symbol(Inst) ->
 
 fmt(Term) ->
     unicode:characters_to_binary(io_lib:format("~p", [Term])).
+
+safe_atom_part(V) ->
+    S = binary_to_list(string:lowercase(arbiguard_util:to_binary(V))),
+    [case ((C >= $a andalso C =< $z) orelse (C >= $0 andalso C =< $9)) of true -> C; false -> $_ end || C <- S].

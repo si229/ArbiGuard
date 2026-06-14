@@ -119,6 +119,10 @@ route(#{method := <<"GET">>, path := <<"/api/processes">>}) ->
     json_response(200, arbiguard_processes:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/executor/state">>}) ->
     json_response(200, arbiguard_executor:snapshot());
+route(#{method := <<"GET">>, path := <<"/api/accounts">>}) ->
+    json_response(200, arbiguard_account_manager:snapshot());
+route(#{method := <<"POST">>, path := <<"/api/accounts">>, body := Body}) ->
+    json_response(200, arbiguard_account_manager:create_account(safe_decode(Body)));
 route(#{method := <<"GET">>, path := <<"/api/funding/state">>}) ->
     json_response(200, arbiguard_state:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/trades/history">>, query_params := Query}) ->
@@ -141,8 +145,12 @@ route(#{method := <<"POST">>, path := <<"/api/live/enabled">>, body := Body}) ->
 route(#{method := <<"POST">>, path := <<"/api/live/token">>, body := Body}) ->
     Payload = safe_decode(Body),
     Exchange = maps:get(exchange, Payload, <<"">>),
+    AccountID = maps:get(account_id, Payload, <<"live-main">>),
     Token = maps:remove(exchange, Payload),
-    json_response(200, #{ok => arbiguard_live_account:set_exchange_token(Exchange, Token)});
+    _ = catch arbiguard_exchange_account:set_token(AccountID, Exchange, maps:remove(account_id, Token)),
+    json_response(200, #{ok => arbiguard_live_account:set_exchange_token(Exchange, maps:remove(account_id, Token)),
+                         account_id => AccountID,
+                         exchange => Exchange});
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
     Payload = safe_decode(Body),
     ExecutorReset = arbiguard_executor:reset(),

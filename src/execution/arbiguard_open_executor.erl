@@ -1,28 +1,56 @@
 -module(arbiguard_open_executor).
 -behaviour(gen_server).
 
--export([start_link/0, notify_opportunities/2, submit_order/2, reset/0, snapshot/0]).
+-export([start_link/0, start_link/1, account_name/1,
+         notify_opportunities/2, notify_opportunities/3,
+         submit_order/2, submit_order/3, reset/0, reset/1,
+         snapshot/0, snapshot/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {orders = #{}, last_opportunities = [], last_notify = 0, ticker_cache = #{}, last_rejects = []}).
+-record(state, {account_id = <<"paper-main">>, account_mode = <<"paper">>,
+                orders = #{}, last_opportunities = [], last_notify = 0,
+                ticker_cache = #{}, last_rejects = []}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+start_link(Config) ->
+    AccountID = maps:get(account_id, Config, <<"paper-main">>),
+    Name = maps:get(name, Config, account_name(AccountID)),
+    gen_server:start_link({local, Name}, ?MODULE, [Config], []).
+
+account_name(AccountID) ->
+    list_to_atom("arbiguard_open_executor_" ++ safe_atom_part(AccountID)).
+
 notify_opportunities(Req, Result) ->
     gen_server:cast(?MODULE, {opportunities, Req, Result}).
+
+notify_opportunities(Executor, Req, Result) ->
+    gen_server:cast(Executor, {opportunities, Req, Result}).
 
 submit_order(Req, Opportunity) ->
     gen_server:call(?MODULE, {submit_order, Req, Opportunity}).
 
+submit_order(Executor, Req, Opportunity) ->
+    gen_server:call(Executor, {submit_order, Req, Opportunity}).
+
 reset() ->
     gen_server:call(?MODULE, reset).
+
+reset(Executor) ->
+    gen_server:call(Executor, reset).
 
 snapshot() ->
     gen_server:call(?MODULE, snapshot).
 
+snapshot(Executor) ->
+    gen_server:call(Executor, snapshot).
+
 init([]) ->
-    {ok, #state{}}.
+    {ok, #state{}};
+init([Config]) ->
+    {ok, #state{account_id = maps:get(account_id, Config, <<"paper-main">>),
+                account_mode = maps:get(account_mode, Config, <<"paper">>)}}.
 
 handle_call({submit_order, Req, Opportunity}, _From, State) ->
     {Order, NewState} = create_order(Req, Opportunity, State),
@@ -32,7 +60,9 @@ handle_call(reset, _From, State = #state{orders = Orders}) ->
     {reply, #{ok => true, cleared_open_orders => maps:size(Orders)},
      State#state{orders = #{}, last_opportunities = [], ticker_cache = #{}, last_rejects = []}};
 handle_call(snapshot, _From, State) ->
-    {reply, #{orders => [public_order(O) || O <- maps:values(State#state.orders)],
+    {reply, #{account_id => State#state.account_id,
+              account_mode => State#state.account_mode,
+              orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_opportunities => State#state.last_opportunities,
               open_rejects => State#state.last_rejects,
               last_notify => State#state.last_notify,
@@ -42,7 +72,7 @@ handle_call(_Req, _From, State) ->
 
 handle_cast({opportunities, Req, Result}, State) ->
     Opportunities = maps:get(opportunities, Result, []),
-    Req1 = arbiguard_calc:normalize_request(Req),
+    Req1 = with_state_account(arbiguard_calc:normalize_request(Req), State),
     CurrentIDs = opportunity_id_set(Req1, Opportunities),
     PrunedState = prune_stale_waiting_orders(CurrentIDs, State),
     NewState = lists:foldl(fun(Op, Acc) -> maybe_create_execution_order(Req1, Op, Acc) end, PrunedState, Opportunities),
@@ -192,7 +222,7 @@ trim_rejects(Rejects) ->
     lists:sublist(Rejects, 50).
 
 create_order(Req, Op, State = #state{orders = Orders}) ->
-    Req1 = arbiguard_calc:normalize_request(Req),
+    Req1 = with_state_account(arbiguard_calc:normalize_request(Req), State),
     subscribe_order_symbols(Op),
     Order = (order_plan(Req1, Op))#{status => <<"waiting_ws_ticker">>,
                                    req => Req1,
@@ -732,7 +762,7 @@ update_symbol_cache(Row, Cache) ->
 maybe_handoff_position_to_close(Req, Result) when is_map(Result) ->
     case maps:get(opened_position, Result, undefined) of
         Position when is_map(Position) ->
-            _ = catch arbiguard_close_executor:track_position(Req, Position),
+            _ = catch arbiguard_account_manager:track_position(Req, Position),
             lager:info("open executor handed position to close executor symbol=~s long=~s short=~s",
                        [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
                         maps:get(short_exchange, Position, <<"">>)]),
@@ -754,3 +784,11 @@ order_to_position(Order) ->
       notional_usdt => Notional,
       opened_at => maps:get(created_at, Order, arbiguard_util:now_ms()),
       updated_at => arbiguard_util:now_ms()}.
+
+with_state_account(Req, State) ->
+    Req#{account_id => maps:get(account_id, Req, State#state.account_id),
+         account_mode => maps:get(account_mode, Req, State#state.account_mode)}.
+
+safe_atom_part(V) ->
+    S = binary_to_list(string:lowercase(arbiguard_util:to_binary(V))),
+    [case ((C >= $a andalso C =< $z) orelse (C >= $0 andalso C =< $9)) of true -> C; false -> $_ end || C <- S].
