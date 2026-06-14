@@ -49,6 +49,13 @@
           <div><label>最低预期利润 USDT</label><input id="min_execution_profit_usdt" value="10"></div>
           <div><label>展示数量</label><input id="limit" value="30"></div>
         </div>
+        <h3>交易所手续费参数</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>交易所</th><th>Maker费率</th><th>Taker费率</th><th>手续费返还比例</th><th>实际Taker费率</th><th>操作</th></tr></thead>
+            <tbody id="exchangeFeeRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
@@ -94,6 +101,7 @@
 
       <section class="panel">
         <h2>套利机会</h2>
+        <div id="opStats" class="status small">等待扫描统计。</div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>币种</th><th>类型</th><th>方式</th><th>做多交易所</th><th>做空交易所</th><th>名义仓位</th><th>净回报率</th><th>预期利润</th><th>资金费差</th><th>价格差</th><th>最近结算倒计时</th></tr></thead>
@@ -106,11 +114,11 @@
         <h2>模拟盘持仓</h2>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>多头开仓均价</th><th>多头实时价</th><th>空头开仓均价</th><th>空头实时价</th><th>当前浮盈</th><th>预期盈利</th><th>资金费轮数</th><th>资金费金额</th><th>开仓时间</th></tr></thead>
+            <thead><tr><th>币种</th><th>做多</th><th>做空</th><th>名义仓位</th><th>多头开仓均价</th><th>多头实时价</th><th>空头开仓均价</th><th>空头实时价</th><th>当前浮盈</th><th>预期盈利</th><th>最近资金费预估</th><th>最近资金费时间</th><th>资金费轮数</th><th>已结资金费金额</th><th>开仓时间</th></tr></thead>
             <tbody id="positionRows"></tbody>
           </table>
         </div>
-        <div class="muted note">当前浮盈 = 多头按当前 bid 平仓收益 + 空头按当前 ask 平仓收益 - 预估平仓手续费；不包含未来资金费。</div>
+        <div class="muted note">当前浮盈 = 多头按当前可平仓价格计算的盈亏 + 空头按当前可平仓价格计算的盈亏 + 已结算资金费 - 预估平仓手续费；不包含未来资金费。最近资金费预估只表示下一次最先发生的资金费结算金额。</div>
       </section>
 
       <section class="panel">
@@ -145,7 +153,6 @@
             <h2>实盘账户配置</h2>
           </div>
           <div class="actions">
-            <button onclick="addLiveExchangeRow()">添加交易所</button>
             <button class="primary" onclick="saveLiveConfigRows()">保存配置</button>
             <button onclick="refreshAll()">刷新配置状态</button>
             <button onclick="syncLiveAccount()">同步账户状态</button>
@@ -161,6 +168,9 @@
             <thead><tr><th>交易所</th><th>API Key</th><th>API Secret</th><th>Passphrase / UID</th><th>Access Token</th><th>备注</th><th>已配置</th><th>账户进程</th><th>私有 WS</th><th>同步状态</th><th>最近同步</th><th>错误</th><th>操作</th></tr></thead>
             <tbody id="liveExchangeConfigRows"></tbody>
           </table>
+        </div>
+        <div class="actions under-table">
+          <button onclick="addLiveExchangeRow()">添加交易所</button>
         </div>
       </section>
 

@@ -1,7 +1,7 @@
 -module(arbiguard_exchange_account).
 -behaviour(gen_server).
 
--export([start_link/3, name/2, snapshot/2, sync_now/2, set_token/3, get_token/2,
+-export([start_link/3, name/2, snapshot/2, stop/2, sync_now/2, set_token/3, get_token/2,
          report_order_event/3, report_balance/3, report_position/3,
          report_liquidation/3, report_funding_settlement/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -20,6 +20,12 @@ name(AccountID, ExchangeID) ->
 
 snapshot(AccountID, ExchangeID) ->
     gen_server:call(name(AccountID, ExchangeID), snapshot).
+
+stop(AccountID, ExchangeID) ->
+    case whereis(name(AccountID, ExchangeID)) of
+        undefined -> ok;
+        Pid -> gen_server:stop(Pid, normal, 5000)
+    end.
 
 sync_now(AccountID, ExchangeID) ->
     gen_server:call(name(AccountID, ExchangeID), sync_now, 30000).

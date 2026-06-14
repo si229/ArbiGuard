@@ -36,23 +36,23 @@ default_exchanges() ->
     [#{id => <<"binance">>, name => <<"Binance">>, enabled => true,
        base_url => <<"https://fapi.binance.com">>,
        ws_host => <<"fstream.binance.com">>, ws_port => 443, ws_path => <<"/public/ws">>,
-       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, fee_rebate_rate => 0.0, funding_interval_hours => 8},
      #{id => <<"okx">>, name => <<"OKX">>, enabled => true,
        base_url => <<"https://www.okx.com">>,
        ws_host => <<"ws.okx.com">>, ws_port => 8443, ws_path => <<"/ws/v5/public">>,
-       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, fee_rebate_rate => 0.0, funding_interval_hours => 8},
      #{id => <<"gate">>, name => <<"Gate.io">>, enabled => true,
        base_url => <<"https://api.gateio.ws/api/v4">>,
        ws_host => <<"fx-ws.gateio.ws">>, ws_port => 443, ws_path => <<"/v4/ws/usdt">>,
-       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, fee_rebate_rate => 0.0, funding_interval_hours => 8},
      #{id => <<"weex">>, name => <<"WEEX">>, enabled => true,
        base_url => <<"https://api-contract.weex.com">>,
        ws_host => <<"ws-contract.weex.com">>, ws_port => 443, ws_path => <<"/v3/ws/public">>,
-       maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, funding_interval_hours => 8},
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, fee_rebate_rate => 0.8, funding_interval_hours => 8},
      #{id => <<"htx">>, name => <<"HTX">>, enabled => true,
        base_url => <<"https://api.hbdm.com">>,
        ws_host => <<"api.hbdm.com">>, ws_port => 443, ws_path => <<"/linear-swap-ws">>,
-       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8}].
+       maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, fee_rebate_rate => 0.0, funding_interval_hours => 8}].
 
 normalize_exchanges(Rows) ->
     [normalize_exchange(E) || E <- Rows, maps:get(enabled, E, true) =:= true].
@@ -64,6 +64,7 @@ normalize_exchange(E) ->
         name => maps:get(name, E, string:uppercase(ID)),
         maker_fee_rate => f(maps:get(maker_fee_rate, E, 0.0002), 0.0002),
         taker_fee_rate => f(maps:get(taker_fee_rate, E, 0.0005), 0.0005),
+        fee_rebate_rate => clamp01(f(maps:get(fee_rebate_rate, E, 0.0), 0.0)),
         funding_interval_hours => f(maps:get(funding_interval_hours, E, 8), 8),
         max_single_order_usdt => f(maps:get(max_single_order_usdt, E, 0), 0),
         max_total_position_usdt => f(maps:get(max_total_position_usdt, E, 0), 0)
@@ -74,10 +75,14 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
         false -> false;
         true ->
             Notional = max_position_usdt(Req, LongLeg, ShortLeg),
-            LongPrice = f(maps:get(mark_price, LongLeg, 0), 0),
-            ShortPrice = f(maps:get(mark_price, ShortLeg, 0), 0),
+            LongMarkPrice = f(maps:get(mark_price, LongLeg, 0), 0),
+            ShortMarkPrice = f(maps:get(mark_price, ShortLeg, 0), 0),
+            %% Opening execution uses taker prices: buy long at ask, sell short at bid.
+            %% Fall back to mark only when the exchange snapshot has no executable quote yet.
+            LongPrice = executable_open_price(long, LongLeg),
+            ShortPrice = executable_open_price(short, ShortLeg),
             Mid = (LongPrice + ShortPrice) / 2,
-            PriceGap = (ShortPrice - LongPrice) / Mid,
+            PriceGap = executable_price_gap(LongLeg, ShortLeg, LongPrice, ShortPrice, Mid),
             FundingEdge0 = next_settlement_return(LongLeg, ShortLeg),
             {FundingEdge, Method0} =
                 case can_collect_short_before_long(LongLeg, ShortLeg) of
@@ -89,11 +94,17 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
             case (FundingEdge >= MinFunding) orelse (abs(PriceGap) >= MinGap) of
                 false -> false;
                 true ->
-                    OpenFeeRate = f(maps:get(taker_fee_rate, LongLeg, 0.0005), 0.0005) + f(maps:get(taker_fee_rate, ShortLeg, 0.0005), 0.0005),
+                    LongGrossFeeRate = f(maps:get(taker_fee_rate, LongLeg, 0.0005), 0.0005),
+                    ShortGrossFeeRate = f(maps:get(taker_fee_rate, ShortLeg, 0.0005), 0.0005),
+                    LongFeeRate = effective_fee_rate(LongLeg),
+                    ShortFeeRate = effective_fee_rate(ShortLeg),
+                    OpenFeeRate = LongFeeRate + ShortFeeRate,
                     RoundTripFeeRate = OpenFeeRate * 2,
                     ExpectedNetReturn = FundingEdge + PriceGap - RoundTripFeeRate,
+                    ExecutionBasisOK = abs(PriceGap) =< f(maps:get(max_basis_rate, Req, 0.02), 0.02),
                     case ExpectedNetReturn > 0 of
                         false -> false;
+                        true when not ExecutionBasisOK -> false;
                         true ->
                             Type = classify(FundingEdge, PriceGap, MinFunding, MinGap),
                             Method = method(Type, Method0),
@@ -108,16 +119,27 @@ build_opportunity(Req, Symbol, LongLeg, ShortLeg) ->
                               short_exchange => maps:get(exchange, ShortLeg),
                               long_price => LongPrice,
                               short_price => ShortPrice,
-                              long_mark_price => LongPrice,
-                              short_mark_price => ShortPrice,
+                              long_bid => f(maps:get(bid, LongLeg, 0), 0),
+                              long_ask => f(maps:get(ask, LongLeg, LongPrice), LongPrice),
+                              short_bid => f(maps:get(bid, ShortLeg, ShortPrice), ShortPrice),
+                              short_ask => f(maps:get(ask, ShortLeg, 0), 0),
+                              long_updated_at => maps:get(updated_at, LongLeg, 0),
+                              short_updated_at => maps:get(updated_at, ShortLeg, 0),
+                              execution_price_basis => executable_price_basis(LongLeg, ShortLeg),
+                              long_mark_price => LongMarkPrice,
+                              short_mark_price => ShortMarkPrice,
                               long_funding_rate => f(maps:get(funding_rate, LongLeg, 0), 0),
                               short_funding_rate => f(maps:get(funding_rate, ShortLeg, 0), 0),
                               long_funding_interval_hours => f(maps:get(funding_interval_hours, LongLeg, 8), 8),
                               short_funding_interval_hours => f(maps:get(funding_interval_hours, ShortLeg, 8), 8),
                               long_next_funding_time => maps:get(next_funding_time, LongLeg, 0),
                               short_next_funding_time => maps:get(next_funding_time, ShortLeg, 0),
-                              long_fee_rate => f(maps:get(taker_fee_rate, LongLeg, 0.0005), 0.0005),
-                              short_fee_rate => f(maps:get(taker_fee_rate, ShortLeg, 0.0005), 0.0005),
+                              long_fee_rate => LongFeeRate,
+                              short_fee_rate => ShortFeeRate,
+                              long_gross_fee_rate => LongGrossFeeRate,
+                              short_gross_fee_rate => ShortGrossFeeRate,
+                              long_fee_rebate_rate => clamp01(f(maps:get(fee_rebate_rate, LongLeg, 0), 0)),
+                              short_fee_rebate_rate => clamp01(f(maps:get(fee_rebate_rate, ShortLeg, 0), 0)),
                               basis_rate => PriceGap,
                               price_gap_return => PriceGap,
                               funding_edge_return => FundingEdge,
@@ -151,6 +173,30 @@ valid_legs(Req, LongLeg, ShortLeg) ->
     BasisOK = Mid > 0 andalso abs((ShortPrice - LongPrice) / Mid) =< MaxBasis,
     (not Same) andalso LongPrice > 0 andalso ShortPrice > 0 andalso VolOK andalso BasisOK andalso
         short_cycle_positive(LongLeg, ShortLeg) andalso (not delist_risk(LongLeg)) andalso (not delist_risk(ShortLeg)).
+
+executable_open_price(long, Leg) ->
+    choose_positive(f(maps:get(ask, Leg, 0), 0), f(maps:get(mark_price, Leg, 0), 0));
+executable_open_price(short, Leg) ->
+    choose_positive(f(maps:get(bid, Leg, 0), 0), f(maps:get(mark_price, Leg, 0), 0)).
+
+executable_price_basis(LongLeg, ShortLeg) ->
+    LongAsk = f(maps:get(ask, LongLeg, 0), 0),
+    ShortBid = f(maps:get(bid, ShortLeg, 0), 0),
+    case LongAsk > 0 andalso ShortBid > 0 of
+        true -> <<"taker_bid_ask">>;
+        false -> <<"mark_price_fallback">>
+    end.
+
+executable_price_gap(LongLeg, ShortLeg, LongPrice, ShortPrice, Mid) ->
+    LongAsk = f(maps:get(ask, LongLeg, 0), 0),
+    ShortBid = f(maps:get(bid, ShortLeg, 0), 0),
+    case LongAsk > 0 andalso ShortBid > 0 andalso Mid > 0 andalso LongPrice > 0 andalso ShortPrice > 0 of
+        true -> (ShortPrice - LongPrice) / Mid;
+        false -> 0.0
+    end.
+
+choose_positive(Value, _Fallback) when Value > 0 -> Value;
+choose_positive(_Value, Fallback) -> Fallback.
 
 short_cycle_positive(LongLeg, ShortLeg) ->
     LI = normalize_window(f(maps:get(funding_interval_hours, LongLeg, 8), 8)),
@@ -238,6 +284,15 @@ delist_risk(Leg) ->
 
 f(V, D) ->
     arbiguard_util:to_float(V, D).
+
+effective_fee_rate(Leg) ->
+    Gross = f(maps:get(taker_fee_rate, Leg, 0.0005), 0.0005),
+    Rebate = clamp01(f(maps:get(fee_rebate_rate, Leg, 0.0), 0.0)),
+    Gross * (1.0 - Rebate).
+
+clamp01(V) when V < 0 -> 0.0;
+clamp01(V) when V > 1 -> 1.0;
+clamp01(V) -> V.
 
 lower_bin(V) ->
     string:lowercase(arbiguard_util:to_binary(V)).

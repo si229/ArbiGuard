@@ -139,6 +139,45 @@ function renderExchangeFunds(state) {
   }).join("") || `<tr><td colspan="5">暂无交易所资金数据。</td></tr>`;
 }
 
+function renderExchangeFees(config) {
+  const rows = config.exchanges || [];
+  const el = $("exchangeFeeRows");
+  if (!el) return;
+  el.innerHTML = rows.map(e => {
+    const maker = num(e.maker_fee_rate);
+    const taker = num(e.taker_fee_rate);
+    const rebate = num(e.fee_rebate_rate);
+    const effective = taker * Math.max(0, 1 - rebate);
+    return `<tr data-exchange="${esc(e.id)}">
+      <td>${esc(e.id)}</td>
+      <td><input class="fee-maker" value="${maker}"></td>
+      <td><input class="fee-taker" value="${taker}"></td>
+      <td><input class="fee-rebate" value="${rebate}"></td>
+      <td>${effective.toFixed(8)}</td>
+      <td><button onclick="saveExchangeFee('${esc(e.id)}')">保存费率</button></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="6">暂无交易所费率配置。</td></tr>`;
+}
+
+async function saveExchangeFee(exchange) {
+  try {
+    const row = document.querySelector(`#exchangeFeeRows tr[data-exchange="${CSS.escape(exchange)}"]`);
+    if (!row) return;
+    const body = {
+      exchange,
+      maker_fee_rate: num(row.querySelector(".fee-maker")?.value),
+      taker_fee_rate: num(row.querySelector(".fee-taker")?.value),
+      fee_rebate_rate: num(row.querySelector(".fee-rebate")?.value)
+    };
+    const r = await api("/api/config/exchange/fees", {method: "POST", body: JSON.stringify(body)});
+    if (r.ok === false) throw new Error(display(r.error || r.reason));
+    setStatus(`已更新 ${exchange} 费率：实际 taker=${num(r.effective_taker_fee_rate).toFixed(8)}，下一轮扫描生效。`);
+    await refreshAll();
+  } catch (e) {
+    setStatus(`保存交易所费率失败：${e.message}`);
+  }
+}
+
 function renderProcesses(proc) {
   $("processRows").innerHTML = (proc.exchanges || []).map(e => {
     const t = e.ticker || {};
@@ -198,6 +237,24 @@ function renderOps(ops) {
   </tr>`).join("") || `<tr><td colspan="11">暂无套利机会。</td></tr>`;
 }
 
+function renderOpportunityStats(result) {
+  const el = $("opStats");
+  if (!el) return;
+  const stats = result?.opportunity_exchange_stats || {};
+  const total = stats.total ?? result?.opportunity_count ?? 0;
+  const executable = stats.executable ?? result?.execution_opportunity_count ?? 0;
+  const byExchange = stats.by_exchange || [];
+  const executableByExchange = {};
+  (stats.executable_by_exchange || []).forEach(x => { executableByExchange[x.exchange] = x.count; });
+  const bestByExchange = {};
+  (stats.best_by_exchange || []).forEach(x => { bestByExchange[x.exchange] = x; });
+  const rows = byExchange.map(x => {
+    const best = bestByExchange[x.exchange] || {};
+    return `${x.exchange}: ${x.count}个 / 可执行${executableByExchange[x.exchange] || 0}个 / 最优${money(best.estimated_net_profit)} ${best.symbol || "-"}`;
+  });
+  el.textContent = `扫描机会：总${total}个，可执行${executable}个，展示${result?.display_limit ?? result?.opportunities?.length ?? 0}个。${rows.join("；")}`;
+}
+
 function renderPositions(state) {
   $("positionRows").innerHTML = (state.positions || []).map(p => {
     const lr = num(p.long_funding_settlement_count);
@@ -209,10 +266,12 @@ function renderPositions(state) {
       <td>${esc(p.short_entry_price ?? "-")}</td><td>${esc(p.short_current_price ?? "-")}</td>
       <td class="${cls(p.unrealized_pnl)}">${money(p.unrealized_pnl)}</td>
       <td class="${cls(p.expected_net_profit)}">${money(p.expected_net_profit)}</td>
+      <td class="${cls(p.next_funding_estimated_pnl)}">${money(p.next_funding_estimated_pnl)} (${esc(p.next_funding_scope || "-")})</td>
+      <td>${esc(timeMs(p.next_funding_time))}</td>
       <td>${lr + sr} (${lr}/${sr})</td><td class="${cls(p.funding_pnl)}">${money(p.funding_pnl)}</td>
       <td>${esc(timeMs(p.opened_at))}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="13">暂无持仓。</td></tr>`;
+  }).join("") || `<tr><td colspan="15">暂无持仓。</td></tr>`;
 }
 
 function renderLiveAccounts(live) {
@@ -422,6 +481,7 @@ async function refreshAll() {
     const state = value(1, lastState || {});
     const exec = value(2, {});
     const live = value(3, lastLive || {});
+    const config = value(4, {});
     const failed = settled
       .map((x, i) => x.status === "rejected" ? ["进程", "模拟盘", "执行", "实盘", "配置"][i] : "")
       .filter(Boolean);
@@ -431,10 +491,12 @@ async function refreshAll() {
     lastLive = live;
     renderCards(proc, state, live);
     renderExchangeFunds(state);
+    renderExchangeFees(config);
     renderProcesses(proc);
     renderOrders(exec);
     renderOpenRejects(exec);
     renderOps(exec.last_opportunities || []);
+    renderOpportunityStats(proc.scanner?.last_result || {});
     renderPositions(state);
     renderLiveAccounts(live);
     renderDebugState(live);
@@ -452,6 +514,7 @@ async function scanOnce() {
     const r = await api("/api/funding/scan", {method: "POST", body: JSON.stringify(payload())});
     lastState = r.paper_account || {};
     renderOps(r.opportunities || []);
+    renderOpportunityStats(r);
     renderPositions(lastState);
     renderLogs(lastState);
     await refreshAll();
@@ -531,7 +594,8 @@ async function saveLiveConfigRows() {
       const isDeleted = row.dataset.deleted === "true";
       if (isDeleted) {
         if (configured) {
-          await api("/api/live/token/delete", {method: "POST", body: JSON.stringify({account_id, exchange})});
+          const r = await api("/api/live/token/delete", {method: "POST", body: JSON.stringify({account_id, exchange})});
+          if (r.ok === false) throw new Error(`删除 ${exchange} 被拒绝：${display(r.reason)} ${JSON.stringify(r.detail || {})}`);
           deleted += 1;
         }
         continue;
@@ -547,7 +611,8 @@ async function saveLiveConfigRows() {
       };
       const hasAuth = token.api_key.trim() && token.api_secret.trim();
       if (hasAuth) {
-        await api("/api/live/token", {method: "POST", body: JSON.stringify(token)});
+        const r = await api("/api/live/token", {method: "POST", body: JSON.stringify(token)});
+        if (r.ok === false) throw new Error(`保存 ${exchange} 失败：${display(r.reason)}`);
         saved += 1;
       } else if (!configured) {
         skipped += 1;

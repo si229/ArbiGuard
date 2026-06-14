@@ -63,7 +63,10 @@ scan(Req0) ->
     Req = arbiguard_calc:normalize_request(Req0),
     {Market, Warnings} = load_market(Req),
     Opportunities0 = build_all(Req, Market),
-    Opportunities = limit(sort_ops(Opportunities0), maps:get(limit, Req, 30)),
+    Sorted = sort_ops(Opportunities0),
+    ExecutionOpportunities = executable_ops(Req, Sorted),
+    DisplayLimit = maps:get(limit, Req, 30),
+    Opportunities = limit(Sorted, DisplayLimit),
     #{exchange => <<"multi">>,
       strategy => <<"cross_exchange_perp_funding">>,
       capital_usdt => maps:get(capital_usdt, Req),
@@ -78,6 +81,11 @@ scan(Req0) ->
       paper_leverage => maps:get(paper_leverage, Req),
       monitor_mode => monitor_mode(Opportunities),
       opportunities => Opportunities,
+      execution_opportunities => ExecutionOpportunities,
+      opportunity_count => length(Sorted),
+      execution_opportunity_count => length(ExecutionOpportunities),
+      display_limit => DisplayLimit,
+      opportunity_exchange_stats => opportunity_exchange_stats(Sorted, ExecutionOpportunities),
       exchanges => maps:get(exchanges, Req),
       warnings => Warnings,
       updated_at => iso_now()}.
@@ -96,7 +104,7 @@ run_scan(Req) ->
 
 persist_scan_result(Req0, Result) ->
     Req = arbiguard_calc:normalize_request(Req0),
-    Ops = maps:get(opportunities, Result, []),
+    Ops = maps:get(execution_opportunities, Result, maps:get(opportunities, Result, [])),
     ok = arbiguard_ets:put_opportunities(Req, Ops),
     ok.
 
@@ -161,6 +169,7 @@ normalize_row(Row) ->
         funding_interval_hours => arbiguard_util:to_float(maps:get(funding_interval_hours, Row, 8), 8),
         taker_fee_rate => arbiguard_util:to_float(maps:get(taker_fee_rate, Row, 0.0005), 0.0005),
         maker_fee_rate => arbiguard_util:to_float(maps:get(maker_fee_rate, Row, 0.0002), 0.0002),
+        fee_rebate_rate => clamp01(arbiguard_util:to_float(maps:get(fee_rebate_rate, Row, 0.0), 0.0)),
         max_single_order_usdt => arbiguard_util:to_float(maps:get(max_single_order_usdt, Row, 0), 0),
         max_total_position_usdt => arbiguard_util:to_float(maps:get(max_total_position_usdt, Row, 0), 0),
         quote_volume => arbiguard_util:to_float(maps:get(quote_volume, Row, 0), 0),
@@ -190,6 +199,54 @@ limit(Ops, N) when is_integer(N), N > 0, length(Ops) > N ->
 limit(Ops, _) ->
     Ops.
 
+executable_ops(Req, Ops) ->
+    MinProfit = maps:get(min_execution_profit_usdt, Req, 10.0),
+    [Op || Op <- Ops, maps:get(estimated_net_profit, Op, 0.0) >= MinProfit].
+
+opportunity_exchange_stats(All, Executable) ->
+    #{total => length(All),
+      executable => length(Executable),
+      by_exchange => exchange_count_rows(exchange_counts(All)),
+      executable_by_exchange => exchange_count_rows(exchange_counts(Executable)),
+      best_by_exchange => best_exchange_rows(best_by_exchange(All))}.
+
+exchange_counts(Ops) ->
+    lists:foldl(fun(Op, Acc) ->
+        lists:foldl(fun(Exchange, Acc1) ->
+            maps:update_with(Exchange, fun(N) -> N + 1 end, 1, Acc1)
+        end, Acc, opportunity_exchanges(Op))
+    end, #{}, Ops).
+
+best_by_exchange(Ops) ->
+    lists:foldl(fun(Op, Acc) ->
+        lists:foldl(fun(Exchange, Acc1) ->
+            Old = maps:get(Exchange, Acc1, undefined),
+            case Old =:= undefined orelse maps:get(estimated_net_profit, Op, 0.0) > maps:get(estimated_net_profit, Old, 0.0) of
+                true -> Acc1#{Exchange => Op};
+                false -> Acc1
+            end
+        end, Acc, opportunity_exchanges(Op))
+    end, #{}, Ops).
+
+opportunity_exchanges(Op) ->
+    lists:usort([maps:get(long_exchange, Op, <<"">>), maps:get(short_exchange, Op, <<"">>)]) -- [<<"">>].
+
+exchange_count_rows(Counts) ->
+    Rows = [#{exchange => Exchange, count => Count} || {Exchange, Count} <- maps:to_list(Counts)],
+    lists:sort(fun(A, B) -> maps:get(count, A, 0) >= maps:get(count, B, 0) end, Rows).
+
+best_exchange_rows(Best) ->
+    Rows = [#{exchange => Exchange,
+              symbol => maps:get(symbol, Op, <<"">>),
+              long_exchange => maps:get(long_exchange, Op, <<"">>),
+              short_exchange => maps:get(short_exchange, Op, <<"">>),
+              estimated_net_profit => maps:get(estimated_net_profit, Op, 0.0),
+              expected_net_return => maps:get(expected_net_return, Op, 0.0)}
+            || {Exchange, Op} <- maps:to_list(Best)],
+    lists:sort(fun(A, B) ->
+        maps:get(estimated_net_profit, A, 0.0) >= maps:get(estimated_net_profit, B, 0.0)
+    end, Rows).
+
 monitor_mode(Ops) ->
     case lists:any(fun(Op) -> maps:get(in_execution_window, Op, false) =:= true end, Ops) of
         true -> <<"execution_window">>;
@@ -209,6 +266,10 @@ max_position_usdt(Req) ->
 
 lower(V) -> string:lowercase(arbiguard_util:to_binary(V)).
 upper(V) -> string:uppercase(arbiguard_util:to_binary(V)).
+
+clamp01(V) when V < 0 -> 0.0;
+clamp01(V) when V > 1 -> 1.0;
+clamp01(V) -> V.
 
 iso_now() ->
     {{Y, M, D}, {H, Min, S}} = calendar:universal_time(),

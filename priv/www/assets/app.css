@@ -50,6 +50,11 @@ main {
   flex-wrap: wrap;
 }
 
+.under-table {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
 .main-tabs {
   margin-bottom: 14px;
 }

@@ -119,6 +119,14 @@ route(#{method := <<"POST">>, path := <<"/api/config/exchange/limits">>, body :=
                maps:get(max_single_order_usdt, Payload, 0),
                maps:get(max_total_position_usdt, Payload, 0)),
     json_response(200, Result);
+route(#{method := <<"POST">>, path := <<"/api/config/exchange/fees">>, body := Body}) ->
+    Payload = safe_decode(Body),
+    Result = arbiguard_runtime_config:set_exchange_fees(
+               maps:get(exchange, Payload, <<"">>),
+               maps:get(maker_fee_rate, Payload, 0.0002),
+               maps:get(taker_fee_rate, Payload, 0.0005),
+               maps:get(fee_rebate_rate, Payload, 0.0)),
+    json_response(200, Result);
 route(#{method := <<"GET">>, path := <<"/api/processes">>}) ->
     json_response(200, arbiguard_processes:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/executor/state">>}) ->

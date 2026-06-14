@@ -70,8 +70,9 @@ test_order(Payload) ->
     gen_server:call(?MODULE, {test_order, Payload}, 30000).
 
 init([]) ->
+    process_flag(trap_exit, true),
     Paper = default_paper_account(),
-    {Live, _LiveLog} = start_account_workers(default_live_config()),
+    Live = inert_account(default_live_config()),
     {ok, #state{accounts = #{maps:get(id, Paper) => Paper, maps:get(id, Live) => Live}}}.
 
 handle_call(snapshot, _From, State = #state{accounts = Accounts}) ->
@@ -103,10 +104,12 @@ handle_call({set_live_enabled, AccountID0, Enabled0}, _From, State = #state{acco
             {reply, #{ok => false, reason => <<"account_not_found">>, account_id => AccountID}, State};
         Account ->
             Account1 = Account#{live_enabled => Enabled},
-            broadcast_executor_meta(Account1),
+            {Account2, _RuntimeLog} = sync_account_executors(Account1),
+            broadcast_executor_meta(Account2),
+            refresh_exchange_workers(Account1),
             lager:warning("account manager live enabled account=~s enabled=~p", [AccountID, Enabled]),
             {reply, #{ok => true, account_id => AccountID, enabled => Enabled},
-             State#state{accounts = Accounts#{AccountID => Account1}}}
+             State#state{accounts = Accounts#{AccountID => Account2}}}
     end;
 handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State = #state{accounts = Accounts}) ->
     AccountID = norm_account_id(AccountID0),
@@ -119,9 +122,10 @@ handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State 
             Account2 = add_exchange_to_account(Account, ExchangeID),
             Tokens = maps:get(exchange_tokens, Account2, #{}),
             Account1 = Account2#{exchange_tokens => Tokens#{ExchangeID => Token}},
-            broadcast_executor_meta(Account1),
+            {Account3, _RuntimeLog} = sync_account_executors(Account1),
+            broadcast_executor_meta(Account3),
             {reply, #{ok => true, account_id => AccountID, exchange => ExchangeID},
-             State#state{accounts = Accounts1#{AccountID => Account1}}};
+             State#state{accounts = Accounts1#{AccountID => Account3}}};
         {error, Reason} ->
             {reply, #{ok => false, reason => Reason, account_id => AccountID, exchange => ExchangeID}, State}
     end;
@@ -132,19 +136,27 @@ handle_call({delete_exchange_token, AccountID0, ExchangeID0}, _From, State = #st
         undefined ->
             {reply, #{ok => false, reason => <<"account_not_found">>, account_id => AccountID, exchange => ExchangeID}, State};
         Account ->
-            catch arbiguard_exchange_account:set_token(AccountID, ExchangeID, undefined),
-            catch arbiguard_private_ws:refresh_auth(AccountID, ExchangeID),
-            Tokens = maps:remove(ExchangeID, maps:get(exchange_tokens, Account, #{})),
-            ExchangeAccounts = maps:remove(ExchangeID, maps:get(exchange_accounts, Account, #{})),
-            Exchanges = [E || E <- maps:get(exchanges, Account, []), E =/= ExchangeID],
-            Snapshots = maps:remove(ExchangeID, maps:get(exchange_snapshots, Account, #{})),
-            Account1 = Account#{exchange_tokens => Tokens,
-                                exchange_accounts => ExchangeAccounts,
-                                exchanges => Exchanges,
-                                exchange_snapshots => Snapshots},
-            broadcast_executor_meta(Account1),
-            {reply, #{ok => true, account_id => AccountID, exchange => ExchangeID, status => <<"deleted">>},
-             State#state{accounts = Accounts#{AccountID => Account1}}}
+            case can_remove_exchange(AccountID, ExchangeID, Account) of
+                ok ->
+                    catch arbiguard_exchange_account:set_token(AccountID, ExchangeID, undefined),
+                    catch arbiguard_private_ws:stop(AccountID, ExchangeID),
+                    catch arbiguard_exchange_account:stop(AccountID, ExchangeID),
+                    Tokens = maps:remove(ExchangeID, maps:get(exchange_tokens, Account, #{})),
+                    ExchangeAccounts = maps:remove(ExchangeID, maps:get(exchange_accounts, Account, #{})),
+                    Exchanges = [E || E <- maps:get(exchanges, Account, []), E =/= ExchangeID],
+                    Snapshots = maps:remove(ExchangeID, maps:get(exchange_snapshots, Account, #{})),
+                    Account1 = Account#{exchange_tokens => Tokens,
+                                        exchange_accounts => ExchangeAccounts,
+                                        exchanges => Exchanges,
+                                        exchange_snapshots => Snapshots},
+                    {Account2, _RuntimeLog} = sync_account_executors(Account1),
+                    broadcast_executor_meta(Account2),
+                    {reply, #{ok => true, account_id => AccountID, exchange => ExchangeID, status => <<"deleted">>},
+                     State#state{accounts = Accounts#{AccountID => Account2}}};
+                {error, Reason, Detail} ->
+                    {reply, #{ok => false, reason => Reason, detail => Detail,
+                              account_id => AccountID, exchange => ExchangeID}, State}
+            end
     end;
 handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) ->
     Payload = normalize_test_payload(Payload0),
@@ -169,8 +181,8 @@ handle_cast({report_order_event, AccountID0, _ExchangeID, Event}, State = #state
         Account ->
             Open = maps:get(open_executor, Account),
             Close = maps:get(close_executor, Account),
-            Open ! {live_order_update, Event},
-            Close ! {live_order_update, Event}
+            maybe_send_executor(Open, {live_order_update, Event}),
+            maybe_send_executor(Close, {live_order_update, Event})
     end,
     {noreply, State};
 handle_cast({exchange_snapshot_synced, AccountID0, ExchangeID0, Snapshot0}, State = #state{accounts = Accounts}) ->
@@ -199,7 +211,8 @@ handle_cast({report_funding_settlement, AccountID0, PositionID, Settlement}, Sta
     AccountID = norm_account_id(AccountID0),
     case maps:get(AccountID, Accounts, undefined) of
         undefined -> ok;
-        Account -> maps:get(close_executor, Account) ! {live_funding_settlement, PositionID, Settlement}
+        Account -> maybe_send_executor(maps:get(close_executor, Account, undefined),
+                                       {live_funding_settlement, PositionID, Settlement})
     end,
     {noreply, State};
 handle_cast({track_position, Req0, Position0}, State = #state{accounts = Accounts}) ->
@@ -211,12 +224,16 @@ handle_cast({track_position, Req0, Position0}, State = #state{accounts = Account
             lager:warning("account manager drop track_position account_not_found account=~s symbol=~s",
                           [AccountID, maps:get(symbol, Position, <<"">>)]);
         Account ->
-            gen_server:cast(maps:get(close_executor, Account), {track_position, with_account_meta(Req, Account), Position})
+            maybe_cast_executor(maps:get(close_executor, Account, undefined),
+                                {track_position, with_account_meta(Req, Account), Position})
     end,
     {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+handle_info({'EXIT', Pid, Reason}, State) ->
+    lager:warning("account manager linked worker exited pid=~p reason=~p", [Pid, Reason]),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -241,6 +258,13 @@ default_live_config() ->
       exchanges => [],
       live_enabled => false}.
 
+inert_account(Config) ->
+    Config#{open_executor => undefined,
+            close_executor => undefined,
+            exchange_accounts => #{},
+            exchange_tokens => maps:get(exchange_tokens, Config, #{}),
+            created_at => arbiguard_util:now_ms()}.
+
 normalize_config(Config0) when is_map(Config0) ->
     Mode = norm_mode(maps:get(mode, Config0, <<"live">>)),
     DefaultID = <<Mode/binary, "-", (integer_to_binary(arbiguard_util:now_ms()))/binary>>,
@@ -259,21 +283,59 @@ normalize_config(_) ->
 
 start_account_workers(Config) ->
     AccountID = maps:get(id, Config),
-    Mode = maps:get(mode, Config),
-    OpenName = arbiguard_open_executor:account_name(AccountID),
-    CloseName = arbiguard_close_executor:account_name(AccountID),
     {ExchangeAccounts, ExchangeLog} = start_exchange_accounts(AccountID, maps:get(exchanges, Config, [])),
     apply_initial_exchange_tokens(AccountID, maps:get(exchange_tokens, Config, #{})),
-    Meta = executor_meta(Config, ExchangeAccounts),
-    OpenLog = ensure_open_executor(OpenName, AccountID, Mode, Meta),
-    CloseLog = ensure_close_executor(CloseName, AccountID, Mode, Meta),
-    {Config#{open_executor => OpenName,
-             close_executor => CloseName,
-             exchange_accounts => ExchangeAccounts,
-             live_enabled => maps:get(live_enabled, Config, false),
-             exchange_tokens => maps:get(exchange_tokens, Config, #{}),
-             created_at => arbiguard_util:now_ms()},
-     #{open_executor => OpenLog, close_executor => CloseLog, exchange_accounts => ExchangeLog}}.
+    Account0 = Config#{exchange_accounts => ExchangeAccounts,
+                       live_enabled => maps:get(live_enabled, Config, false),
+                       exchange_tokens => maps:get(exchange_tokens, Config, #{}),
+                       created_at => arbiguard_util:now_ms()},
+    {Account, RuntimeLog} = sync_account_executors(Account0),
+    {Account, RuntimeLog#{exchange_accounts => ExchangeLog}}.
+
+sync_account_executors(Account) ->
+    case should_run_account_executors(Account) of
+        true ->
+            AccountID = maps:get(id, Account),
+            Mode = maps:get(mode, Account),
+            OpenName = arbiguard_open_executor:account_name(AccountID),
+            CloseName = arbiguard_close_executor:account_name(AccountID),
+            Meta = executor_meta(Account, maps:get(exchange_accounts, Account, #{})),
+            OpenLog = ensure_open_executor(OpenName, AccountID, Mode, Meta),
+            CloseLog = ensure_close_executor(CloseName, AccountID, Mode, Meta),
+            {Account#{open_executor => OpenName, close_executor => CloseName},
+             #{open_executor => OpenLog, close_executor => CloseLog}};
+        false ->
+            stop_account_executors(Account),
+            {Account#{open_executor => undefined, close_executor => undefined},
+             #{open_executor => skipped, close_executor => skipped}}
+    end.
+
+should_run_account_executors(Account) ->
+    case maps:get(mode, Account, <<"live">>) of
+        <<"paper">> ->
+            true;
+        <<"live">> ->
+            maps:get(live_enabled, Account, false) =:= true andalso
+            maps:get(exchanges, Account, []) =/= [];
+        _ ->
+            false
+    end.
+
+stop_account_executors(Account) ->
+    AccountID = maps:get(id, Account, <<"">>),
+    stop_registered_executor(maps:get(open_executor, Account, arbiguard_open_executor:account_name(AccountID))),
+    stop_registered_executor(maps:get(close_executor, Account, arbiguard_close_executor:account_name(AccountID))),
+    ok.
+
+stop_registered_executor(Name) when is_atom(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid ->
+            lager:info("account manager stopping inactive executor name=~p pid=~p", [Name, Pid]),
+            exit(Pid, shutdown)
+    end;
+stop_registered_executor(_Name) ->
+    ok.
 
 ensure_open_executor(Name, AccountID, Mode, Meta) ->
     case whereis(Name) of
@@ -356,12 +418,72 @@ broadcast_executor_meta(Account) ->
     cast_executor_meta(maps:get(close_executor, Account, undefined), Meta),
     ok.
 
+refresh_exchange_workers(Account) ->
+    AccountID = maps:get(id, Account, <<"live-main">>),
+    [catch arbiguard_private_ws:refresh_auth(AccountID, ExchangeID)
+     || ExchangeID <- maps:get(exchanges, Account, [])],
+    ok.
+
+can_remove_exchange(AccountID, ExchangeID, Account) ->
+    Snapshot = exchange_runtime_snapshot(AccountID, ExchangeID, Account),
+    Positions = maps:get(positions, Snapshot, []),
+    Orders = maps:get(orders, Snapshot, []),
+    ActivePositions = [P || P <- Positions, active_position(P)],
+    ActiveOrders = [O || O <- Orders, active_order(O)],
+    case {ActivePositions, ActiveOrders} of
+        {[], []} -> ok;
+        {_, _} ->
+            {error, <<"exchange_has_live_exposure">>,
+             #{positions => length(ActivePositions), orders => length(ActiveOrders)}}
+    end.
+
+exchange_runtime_snapshot(AccountID, ExchangeID, Account) ->
+    Snapshot0 = case catch arbiguard_exchange_account:snapshot(AccountID, ExchangeID) of
+        S when is_map(S) -> S;
+        _ -> maps:get(ExchangeID, maps:get(exchange_snapshots, Account, #{}), #{})
+    end,
+    case maps:size(Snapshot0) of
+        0 -> maps:get(ExchangeID, maps:get(exchange_snapshots, Account, #{}), #{});
+        _ -> Snapshot0
+    end.
+
+active_position(Position) ->
+    position_notional(Position) > 0 orelse abs_float(map_get_any(unrealized_pnl, Position, 0)) > 0.
+
+active_order(Order) ->
+    Status0 = string:lowercase(arbiguard_util:to_binary(map_get_any(status, Order, <<"">>))),
+    Terminal = [<<"filled">>, <<"closed">>, <<"canceled">>, <<"cancelled">>, <<"rejected">>, <<"expired">>, <<"done">>],
+    not lists:member(Status0, Terminal).
+
+abs_float(Value) ->
+    abs(arbiguard_util:to_float(Value, 0)).
+
 cast_executor_meta(Name, Meta) when is_atom(Name) ->
     case whereis(Name) of
         undefined -> ok;
         Pid -> gen_server:cast(Pid, {account_meta, Meta})
     end;
 cast_executor_meta(_Name, _Meta) ->
+    ok.
+
+maybe_send_executor(Name, Msg) when is_atom(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid -> Pid ! Msg
+    end;
+maybe_send_executor(Pid, Msg) when is_pid(Pid) ->
+    Pid ! Msg;
+maybe_send_executor(_Name, _Msg) ->
+    ok.
+
+maybe_cast_executor(Name, Msg) when is_atom(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid -> gen_server:cast(Pid, Msg)
+    end;
+maybe_cast_executor(Pid, Msg) when is_pid(Pid) ->
+    gen_server:cast(Pid, Msg);
+maybe_cast_executor(_Name, _Msg) ->
     ok.
 
 normalize_req_account(Req0, Position) ->
@@ -382,7 +504,7 @@ sync_live_pairs_to_close_executor(Account) ->
     case maps:get(mode, Account, <<"paper">>) of
         <<"live">> ->
             Req = live_track_req(Account),
-            [gen_server:cast(maps:get(close_executor, Account), {track_position, Req, Position})
+            [maybe_cast_executor(maps:get(close_executor, Account, undefined), {track_position, Req, Position})
              || Position <- paired_live_positions(Account)];
         _ ->
             ok

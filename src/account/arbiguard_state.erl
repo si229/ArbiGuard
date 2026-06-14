@@ -143,15 +143,22 @@ refresh_position(Pos, Op) ->
                (maps:get(short_entry_price, Pos, 0) - ShortPrice) * ShortQty,
     FundingPNL = maps:get(funding_pnl, Pos, 0),
     CloseFee = estimated_close_fee(Pos),
-    Pos#{
+    Pos1 = Pos#{
         long_current_price => LongPrice,
         short_current_price => ShortPrice,
         price_pnl => PricePNL,
         unrealized_pnl => PricePNL + FundingPNL - CloseFee,
         expected_net_profit => maps:get(estimated_net_profit, Op, maps:get(expected_net_profit, Pos, 0)),
         expected_net_return => maps:get(expected_net_return, Op, maps:get(expected_net_return, Pos, 0)),
+        long_funding_rate => maps:get(long_funding_rate, Op, maps:get(long_funding_rate, Pos, 0)),
+        short_funding_rate => maps:get(short_funding_rate, Op, maps:get(short_funding_rate, Pos, 0)),
+        long_next_funding_time => maps:get(long_next_funding_time, Op, maps:get(long_next_funding_time, Pos, 0)),
+        short_next_funding_time => maps:get(short_next_funding_time, Op, maps:get(short_next_funding_time, Pos, 0)),
+        long_funding_interval_hours => maps:get(long_funding_interval_hours, Op, maps:get(long_funding_interval_hours, Pos, 8)),
+        short_funding_interval_hours => maps:get(short_funding_interval_hours, Op, maps:get(short_funding_interval_hours, Pos, 8)),
         updated_at => arbiguard_util:now_ms()
-    }.
+    },
+    add_next_funding_estimate(Pos1).
 
 update_position_in_paper(Paper, Position0) ->
     Key = maps:get(id, Position0, maps:get(position_id, Position0, <<"">>)),
@@ -213,7 +220,7 @@ open_position(Paper, Req, Key, Op, Notional) ->
             Now = arbiguard_util:now_ms(),
             LongQty = safe_div(Notional, LongPrice),
             ShortQty = safe_div(Notional, ShortPrice),
-            Pos = #{id => Key,
+            Pos = add_next_funding_estimate(#{id => Key,
                     account_mode => maps:get(mode, Account),
                     account_id => maps:get(id, Account),
                     symbol => maps:get(symbol, Op),
@@ -247,10 +254,14 @@ open_position(Paper, Req, Key, Op, Notional) ->
                     short_funding_rate => maps:get(short_funding_rate, Op, 0),
                     long_funding_interval_hours => maps:get(long_funding_interval_hours, Op, 8),
                     short_funding_interval_hours => maps:get(short_funding_interval_hours, Op, 8),
+                    long_fee_rate => LongFeeRate,
+                    short_fee_rate => ShortFeeRate,
+                    long_next_funding_time => maps:get(long_next_funding_time, Op, 0),
+                    short_next_funding_time => maps:get(short_next_funding_time, Op, 0),
                     opened_at => Now,
                     updated_at => Now,
                     close_threshold => maps:get(price_gap_close_profit_usdt, Req, 10),
-                    last_opportunity_method => maps:get(arbitrage_method, Op, <<"">>)},
+                    last_opportunity_method => maps:get(arbitrage_method, Op, <<"">>)}),
             Trade0 = #{time => Now,
                       action => <<"open">>,
                       account_mode => maps:get(mode, Account),
@@ -368,7 +379,7 @@ refresh_equity(Paper) ->
            balance => BalTotal}.
 
 paper_snapshot(Paper) ->
-    Positions = [P || {_K, P} <- maps:to_list(maps:get(positions, Paper, #{}))],
+    Positions = [add_next_funding_estimate(P) || {_K, P} <- maps:to_list(maps:get(positions, Paper, #{}))],
     Logs = maps:get(logs, Paper, []),
     AccountMode = <<"paper">>,
     AccountID = <<"paper-main">>,
@@ -606,6 +617,32 @@ estimated_close_fee(Pos) ->
             ShortRate = maps:get(short_fee_rate, Pos, 0.0005),
             Notional * (LongRate + ShortRate)
     end.
+
+add_next_funding_estimate(Pos) ->
+    Notional = maps:get(notional, Pos, maps:get(notional_usdt, Pos, 0)),
+    LongPNL = -Notional * maps:get(long_funding_rate, Pos, 0),
+    ShortPNL = Notional * maps:get(short_funding_rate, Pos, 0),
+    LongT = maps:get(long_next_funding_time, Pos, 0),
+    ShortT = maps:get(short_next_funding_time, Pos, 0),
+    {NextT, Estimate, Scope} = next_funding_estimate(LongT, ShortT, LongPNL, ShortPNL),
+    Pos#{next_funding_estimated_pnl => Estimate,
+         next_funding_time => NextT,
+         next_funding_scope => Scope,
+         next_long_funding_estimated_pnl => LongPNL,
+         next_short_funding_estimated_pnl => ShortPNL}.
+
+next_funding_estimate(LongT, ShortT, LongPNL, ShortPNL) when LongT > 0, ShortT > 0 ->
+    case abs(LongT - ShortT) =< 60000 of
+        true -> {min(LongT, ShortT), LongPNL + ShortPNL, <<"both">>};
+        false when LongT < ShortT -> {LongT, LongPNL, <<"long">>};
+        false -> {ShortT, ShortPNL, <<"short">>}
+    end;
+next_funding_estimate(LongT, _ShortT, LongPNL, _ShortPNL) when LongT > 0 ->
+    {LongT, LongPNL, <<"long">>};
+next_funding_estimate(_LongT, ShortT, _LongPNL, ShortPNL) when ShortT > 0 ->
+    {ShortT, ShortPNL, <<"short">>};
+next_funding_estimate(_LongT, _ShortT, LongPNL, ShortPNL) ->
+    {0, LongPNL + ShortPNL, <<"unknown_time_both">>}.
 
 long_liquidation_price(Entry, Leverage) ->
     case Entry > 0 andalso Leverage > 0 of

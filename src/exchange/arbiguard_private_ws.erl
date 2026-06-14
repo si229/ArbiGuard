@@ -1,7 +1,7 @@
 -module(arbiguard_private_ws).
 -behaviour(gen_server).
 
--export([start_link/1, start_link/2, snapshot/1, snapshot/2, name/1, name/2,
+-export([start_link/1, start_link/2, snapshot/1, snapshot/2, stop/2, name/1, name/2,
          inject_event/2, refresh_auth/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -23,6 +23,12 @@ snapshot(ExchangeID) ->
 
 snapshot(AccountID, ExchangeID) ->
     gen_server:call(name(AccountID, ExchangeID), snapshot).
+
+stop(AccountID, ExchangeID) ->
+    case whereis(name(AccountID, ExchangeID)) of
+        undefined -> ok;
+        Pid -> gen_server:stop(Pid, normal, 5000)
+    end.
 
 inject_event(ExchangeID, Event) ->
     gen_server:cast(name(ExchangeID), {inject_event, Event}).

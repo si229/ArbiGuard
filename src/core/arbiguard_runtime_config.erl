@@ -1,6 +1,6 @@
 -module(arbiguard_runtime_config).
 
--export([set_exchange_ws_endpoint/4, set_exchange_limits/3]).
+-export([set_exchange_ws_endpoint/4, set_exchange_limits/3, set_exchange_fees/4]).
 
 set_exchange_ws_endpoint(ExchangeID0, Host0, Port0, Path0) ->
     ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
@@ -65,3 +65,39 @@ update_exchange_limits(ID, MaxSingle, MaxTotal, [E | Rest]) ->
             {Found, Rows} = update_exchange_limits(ID, MaxSingle, MaxTotal, Rest),
             {Found, [E | Rows]}
     end.
+
+set_exchange_fees(ExchangeID0, Maker0, Taker0, Rebate0) ->
+    ExchangeID = string:lowercase(arbiguard_util:to_binary(ExchangeID0)),
+    Maker = arbiguard_util:to_float(Maker0, 0.0002),
+    Taker = arbiguard_util:to_float(Taker0, 0.0005),
+    Rebate = clamp01(arbiguard_util:to_float(Rebate0, 0.0)),
+    Exchanges0 = application:get_env(arbiguard, exchanges, []),
+    {Found, Exchanges} = update_exchange_fees(ExchangeID, Maker, Taker, Rebate, Exchanges0),
+    case Found of
+        true ->
+            ok = application:set_env(arbiguard, exchanges, Exchanges),
+            #{ok => true, exchange => ExchangeID,
+              maker_fee_rate => Maker,
+              taker_fee_rate => Taker,
+              fee_rebate_rate => Rebate,
+              effective_taker_fee_rate => Taker * (1.0 - Rebate)};
+        false ->
+            #{ok => false, error => <<"exchange_not_found">>, exchange => ExchangeID}
+    end.
+
+update_exchange_fees(_ID, _Maker, _Taker, _Rebate, []) ->
+    {false, []};
+update_exchange_fees(ID, Maker, Taker, Rebate, [E | Rest]) ->
+    case string:lowercase(arbiguard_util:to_binary(maps:get(id, E, <<"">>))) =:= ID of
+        true ->
+            {true, [E#{maker_fee_rate => Maker,
+                       taker_fee_rate => Taker,
+                       fee_rebate_rate => Rebate} | Rest]};
+        false ->
+            {Found, Rows} = update_exchange_fees(ID, Maker, Taker, Rebate, Rest),
+            {Found, [E | Rows]}
+    end.
+
+clamp01(V) when V < 0 -> 0.0;
+clamp01(V) when V > 1 -> 1.0;
+clamp01(V) -> V.

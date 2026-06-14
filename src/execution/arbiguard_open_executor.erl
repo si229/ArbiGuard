@@ -82,7 +82,8 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 handle_cast({opportunities, Req, Result}, State) ->
-    {noreply, process_opportunities(Req, maps:get(opportunities, Result, []), 0, State)};
+    Ops = maps:get(execution_opportunities, Result, maps:get(opportunities, Result, [])),
+    {noreply, process_opportunities(Req, Ops, 0, State)};
 handle_cast({account_meta, Meta}, State) ->
     {noreply, apply_account_meta(Meta, State)};
 handle_cast(_Msg, State) ->
@@ -218,6 +219,7 @@ terminal_open_status(<<"filled_paper_open">>) -> true;
 terminal_open_status(<<"filled_live_open">>) -> true;
 terminal_open_status(<<"submitted_live_rejected">>) -> true;
 terminal_open_status(<<"ticker_unavailable">>) -> true;
+terminal_open_status(<<"profit_below_threshold_expired">>) -> true;
 terminal_open_status(_) -> false.
 
 stale_wait_expired(Order) ->
@@ -463,6 +465,24 @@ maybe_timeout_waiting_order(Order) ->
     Now = arbiguard_util:now_ms(),
     CreatedAt = arbiguard_util:to_int(maps:get(created_at, Order, 0), 0),
     TimeoutMs = arbiguard_util:to_int(application:get_env(arbiguard, execution_ticker_wait_timeout_ms, 20000), 20000),
+    ProfitTimeoutMs = arbiguard_util:to_int(application:get_env(arbiguard, execution_profit_wait_timeout_ms, TimeoutMs), TimeoutMs),
+    WaitReason = maps:get(wait_reason, Order, <<"">>),
+    case WaitReason =:= <<"profit_below_threshold_after_ws_price">>
+         andalso CreatedAt > 0
+         andalso Now - CreatedAt >= ProfitTimeoutMs of
+        true ->
+            lager:info("open executor profit wait expired symbol=~s long=~s short=~s timeout_ms=~p detail=~p",
+                       [maps:get(symbol, Order, <<"">>), maps:get(long_exchange, Order, <<"">>),
+                        maps:get(short_exchange, Order, <<"">>), ProfitTimeoutMs, maps:get(wait_detail, Order, #{})]),
+            unsubscribe_order_symbols(Order),
+            Order#{status => <<"profit_below_threshold_expired">>,
+                   finished_at => Now,
+                   remaining_notional => remaining_to_submit(Order)};
+        false ->
+            maybe_timeout_missing_ticker_order(Order, Now, CreatedAt, TimeoutMs)
+    end.
+
+maybe_timeout_missing_ticker_order(Order, Now, CreatedAt, TimeoutMs) ->
     case CreatedAt > 0 andalso Now - CreatedAt >= TimeoutMs of
         true ->
             lager:warning("open executor ticker unavailable timeout symbol=~s long=~s short=~s reason=~s timeout_ms=~p detail=~p",
@@ -651,7 +671,9 @@ refresh_expected_profit(Op, Req) ->
     FeeRate = maps:get(long_fee_rate, Op, 0.0005) + maps:get(short_fee_rate, Op, 0.0005),
     ExpectedNetReturn = FundingEdge + PriceGap - FeeRate * 2,
     Notional = maps:get(suggested_notional, Op, maps:get(execution_notional_usdt, Req, 200.0)),
-    Op#{price_gap_return => PriceGap,
+    Op#{pre_ws_estimated_net_profit => maps:get(estimated_net_profit, Op, 0.0),
+        pre_ws_expected_net_return => maps:get(expected_net_return, Op, 0.0),
+        price_gap_return => PriceGap,
         basis_rate => PriceGap,
         expected_gross_return => FundingEdge + PriceGap,
         expected_net_return => ExpectedNetReturn,
@@ -677,18 +699,28 @@ next_settlement_return(Op) ->
 
 require_profitable(Op, Req) ->
     MinProfit = maps:get(min_execution_profit_usdt, Req, 10.0),
-    case maps:get(estimated_net_profit, Op, 0.0) >= MinProfit of
+    MaxBasis = maps:get(max_basis_rate, Req, 0.02),
+    Profit = maps:get(estimated_net_profit, Op, 0.0),
+    Basis = abs(maps:get(price_gap_return, Op, 0.0)),
+    case Profit >= MinProfit andalso Basis =< MaxBasis of
         true -> {ok, Op};
         false ->
-            lager:info("open executor wait profit_below_threshold symbol=~s profit=~p min=~p",
-                       [maps:get(symbol, Op, <<"">>), maps:get(estimated_net_profit, Op, 0.0), MinProfit]),
-            {wait, #{reason => <<"profit_below_threshold_after_ws_price">>,
+            Reason = case Basis > MaxBasis of
+                true -> <<"basis_too_wide_after_ws_price">>;
+                false -> <<"profit_below_threshold_after_ws_price">>
+            end,
+            lager:info("open executor wait rejected_after_ws symbol=~s reason=~s profit=~p min=~p basis=~p max_basis=~p pre_profit=~p",
+                       [maps:get(symbol, Op, <<"">>), Reason, Profit, MinProfit, Basis, MaxBasis,
+                        maps:get(pre_ws_estimated_net_profit, Op, 0.0)]),
+            {wait, #{reason => Reason,
                      symbol => maps:get(symbol, Op, <<"">>),
-                     estimated_net_profit => maps:get(estimated_net_profit, Op, 0.0),
+                     estimated_net_profit => Profit,
+                     pre_ws_estimated_net_profit => maps:get(pre_ws_estimated_net_profit, Op, 0.0),
                      min_execution_profit_usdt => MinProfit,
                      long_price => maps:get(long_price, Op, 0.0),
                      short_price => maps:get(short_price, Op, 0.0),
                      price_gap_return => maps:get(price_gap_return, Op, 0.0),
+                     max_basis_rate => MaxBasis,
                      funding_edge_return => maps:get(funding_edge_return, Op, 0.0)}}
     end.
 

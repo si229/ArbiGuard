@@ -35,6 +35,7 @@ binance_row(Exchange, I) ->
       funding_interval_hours => f(maps:get(funding_interval_hours, Exchange, 8), 8),
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
+      fee_rebate_rate => f(maps:get(fee_rebate_rate, Exchange, 0.0), 0.0),
       quote_volume => 0,
       updated_at => arbiguard_util:now_ms()}, Exchange).
 
@@ -60,6 +61,7 @@ gate_row(Exchange, I) ->
       funding_interval_hours => normalize_interval(f(maps:get(funding_interval, I, maps:get(funding_interval_hours, Exchange, 8)), 8)),
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
+      fee_rebate_rate => f(maps:get(fee_rebate_rate, Exchange, 0.0), 0.0),
       quote_volume => f(maps:get(volume_24h_quote, I, maps:get(volume_24h_settle, I, 0)), 0),
       delist_time => arbiguard_util:to_int(maps:get(delisting_time, I, 0), 0) * 1000,
       updated_at => arbiguard_util:now_ms()}, Exchange).
@@ -104,6 +106,7 @@ okx_row(Exchange, Base, I) ->
       funding_interval_hours => Interval,
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
+      fee_rebate_rate => f(maps:get(fee_rebate_rate, Exchange, 0.0), 0.0),
       quote_volume => f(maps:get(volCcy24h, I, maps:get(vol24h, I, 0)), 0),
       updated_at => arbiguard_util:now_ms()}, Exchange).
 
@@ -160,6 +163,7 @@ htx_row(Exchange, I, Contracts, Prices) ->
       funding_interval_hours => Interval,
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0005), 0.0005),
+      fee_rebate_rate => f(maps:get(fee_rebate_rate, Exchange, 0.0), 0.0),
       quote_volume => f(maps:get(amount, Price, maps:get(vol, Price, 0)), 0),
       delist_time => delist_time(Contract),
       updated_at => arbiguard_util:now_ms()}, Exchange).
@@ -201,6 +205,7 @@ weex_row(Exchange, T, Premiums, Tradable) ->
       funding_interval_hours => Interval,
       maker_fee_rate => f(maps:get(maker_fee_rate, Exchange, 0.0002), 0.0002),
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0006), 0.0006),
+      fee_rebate_rate => f(maps:get(fee_rebate_rate, Exchange, 0.0), 0.0),
       quote_volume => f(maps:get(quoteVolume, T, maps:get(volume, T, 0)), 0),
       delist_time => positive_int(delist_time(T), delist_time(Premium)),
       api_trading => maps:is_key(Symbol, Tradable),
