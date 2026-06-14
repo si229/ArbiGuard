@@ -7,6 +7,7 @@ start(_Type, _Args) ->
     ok = application:ensure_started(lager),
     ok = application:ensure_started(inets),
     ok = application:ensure_started(ssl),
+    ok = arbiguard_trade_store:init(),
     arbiguard_sup:start_link().
 
 stop(_State) ->

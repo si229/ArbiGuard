@@ -68,7 +68,11 @@ parse_request(Sock, Bin) ->
             Headers = parse_headers(HeaderLines, #{}),
             Len = arbiguard_util:to_int(maps:get(<<"content-length">>, Headers, <<"0">>), 0),
             Body = recv_body(Sock, Body0, Len),
-            {ok, #{method => Method, path => strip_query(Path0), headers => Headers, body => Body}};
+            {ok, #{method => Method,
+                   path => strip_query(Path0),
+                   query_params => parse_query(Path0),
+                   headers => Headers,
+                   body => Body}};
         _ ->
             {error, bad_request}
     end.
@@ -117,8 +121,20 @@ route(#{method := <<"GET">>, path := <<"/api/executor/state">>}) ->
     json_response(200, arbiguard_executor:snapshot());
 route(#{method := <<"GET">>, path := <<"/api/funding/state">>}) ->
     json_response(200, arbiguard_state:snapshot());
+route(#{method := <<"GET">>, path := <<"/api/trades/history">>, query_params := Query}) ->
+    json_response(200, arbiguard_trade_store:page(Query));
+route(#{method := <<"POST">>, path := <<"/api/trades/history">>, body := Body}) ->
+    json_response(200, arbiguard_trade_store:page(safe_decode(Body)));
+route(#{method := <<"GET">>, path := <<"/api/trades/stats">>, query_params := Query}) ->
+    json_response(200, arbiguard_trade_store:stats(Query));
+route(#{method := <<"POST">>, path := <<"/api/trades/stats">>, body := Body}) ->
+    json_response(200, arbiguard_trade_store:stats(safe_decode(Body)));
 route(#{method := <<"GET">>, path := <<"/api/live/state">>}) ->
     json_response(200, arbiguard_live_account:snapshot());
+route(#{method := <<"POST">>, path := <<"/api/debug/exchange/order">>, body := Body}) ->
+    json_response(200, arbiguard_live_account:debug_order(safe_decode(Body)));
+route(#{method := <<"POST">>, path := <<"/api/live/test-order">>, body := Body}) ->
+    json_response(200, arbiguard_live_account:test_order(safe_decode(Body)));
 route(#{method := <<"POST">>, path := <<"/api/live/enabled">>, body := Body}) ->
     Payload = safe_decode(Body),
     json_response(200, arbiguard_live_account:set_enabled(maps:get(enabled, Payload, false)));
@@ -202,7 +218,7 @@ admin_html() ->
         "<div><label>Leverage</label><input id='paper_leverage' value='10'></div><div><label>Max Open Positions</label><input id='max_open_positions' value='5'></div>",
         "<div><label>Max Position Pct</label><input id='max_position_pct' value='0.1'></div><div><label>Min Funding Edge</label><input id='min_funding_rate' value='0.0003'></div>",
         "<div><label>Min Price Gap</label><input id='min_price_gap_rate' value='0.002'></div><div><label>Max Basis</label><input id='max_basis_rate' value='0.02'></div>",
-        "<div><label>Min Profit USDT</label><input id='min_execution_profit_usdt' value='5'></div><div><label>Limit</label><input id='limit' value='30'></div>",
+        "<div><label>Min Profit USDT</label><input id='min_execution_profit_usdt' value='10'></div><div><label>Limit</label><input id='limit' value='30'></div>",
         "</div></section>",
         "<section class='panel'><h2>Overview</h2><div class='grid' id='cards'></div></section>",
         "<section class='panel'><h2>Processes / ETS</h2><div class='table-wrap'><table><thead><tr><th>Exchange</th><th>WS URL</th><th>WS Enabled</th><th>WS Connected</th><th>WS Status</th><th>Subs</th><th>Funding Rows</th><th>Last Refresh</th><th>Error</th></tr></thead><tbody id='processRows'></tbody></table></div></section>",
@@ -229,6 +245,36 @@ admin_html() ->
 
 strip_query(Path) ->
     hd(binary:split(Path, <<"?">>)).
+
+parse_query(Path) ->
+    case binary:split(Path, <<"?">>) of
+        [_OnlyPath] -> #{};
+        [_Path, Query] -> parse_query_pairs(binary:split(Query, <<"&">>, [global]), #{})
+    end.
+
+parse_query_pairs([], Acc) ->
+    Acc;
+parse_query_pairs([Pair | Rest], Acc) ->
+    case binary:split(Pair, <<"=">>) of
+        [K, V] -> parse_query_pairs(Rest, Acc#{url_decode(K) => url_decode(V)});
+        [K] when K =/= <<"">> -> parse_query_pairs(Rest, Acc#{url_decode(K) => <<"">>});
+        _ -> parse_query_pairs(Rest, Acc)
+    end.
+
+url_decode(Bin) ->
+    url_decode(Bin, <<>>).
+
+url_decode(<<>>, Acc) ->
+    Acc;
+url_decode(<<$+, Rest/binary>>, Acc) ->
+    url_decode(Rest, <<Acc/binary, " ">>);
+url_decode(<<$%, A, B, Rest/binary>>, Acc) ->
+    case catch binary_to_integer(<<A, B>>, 16) of
+        N when is_integer(N) -> url_decode(Rest, <<Acc/binary, N>>);
+        _ -> url_decode(Rest, <<Acc/binary, $%, A, B>>)
+    end;
+url_decode(<<C, Rest/binary>>, Acc) ->
+    url_decode(Rest, <<Acc/binary, C>>).
 
 lower_trim(Bin) ->
     string:lowercase(trim(Bin)).

@@ -2,7 +2,8 @@
 -behaviour(gen_server).
 
 -export([start_link/1, start_ws/1, set_ws_endpoint/4, subscribe/3, subscribe/4,
-         unsubscribe/3, unsubscribe/4, upsert_ticker/2, snapshot/1, name/1]).
+         unsubscribe/3, unsubscribe/4, upsert_ticker/2, snapshot/1,
+         subscription_status/2, name/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {exchange, id, subscriptions = #{}, ws_enabled = false,
@@ -36,6 +37,9 @@ upsert_ticker(ExchangeID, Row) ->
 
 snapshot(ExchangeID) ->
     gen_server:call(name(ExchangeID), snapshot).
+
+subscription_status(ExchangeID, Symbol) ->
+    gen_server:call(name(ExchangeID), {subscription_status, Symbol}).
 
 name(ExchangeID) ->
     list_to_atom("arbiguard_ticker_" ++ binary_to_list(string:lowercase(arbiguard_util:to_binary(ExchangeID)))).
@@ -101,6 +105,8 @@ handle_call({unsubscribe, Symbol0, Reason, SubscriberPid}, _From, State = #state
         _ -> State1#state{subscriptions = Subs#{Symbol => NewReasonMap}}
     end,
     {reply, ok, State2};
+handle_call({subscription_status, Symbol0}, _From, State) ->
+    {reply, subscription_status_map(norm_symbol(Symbol0), State), State};
 handle_call(snapshot, _From, State = #state{subscriptions = Subs}) ->
     {WsHost, WsPort, WsPath, WsURL} = ws_endpoint_info(State),
     {reply, #{exchange => State#state.id,
@@ -112,7 +118,8 @@ handle_call(snapshot, _From, State = #state{subscriptions = Subs}) ->
               ws_port => WsPort,
               ws_path => WsPath,
               ws_url => WsURL,
-              subscriptions => maps:keys(Subs)}, State};
+              subscriptions => maps:keys(Subs),
+              subscription_details => [subscription_status_map(Symbol, State) || Symbol <- maps:keys(Subs)]}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -296,6 +303,8 @@ send_ws_heartbeat(#state{id = <<"okx">>, ws_conn = ConnPid, ws_stream = StreamRe
 send_ws_heartbeat(#state{id = <<"gate">>, ws_conn = ConnPid, ws_stream = StreamRef}) ->
     Payload = arbiguard_json:encode(#{time => erlang:system_time(second), channel => <<"futures.ping">>}),
     catch gun:ws_send(ConnPid, StreamRef, {text, Payload});
+send_ws_heartbeat(#state{id = <<"weex">>, ws_conn = ConnPid, ws_stream = StreamRef}) ->
+    catch gun:ws_send(ConnPid, StreamRef, {text, <<"ping">>});
 send_ws_heartbeat(_State) ->
     ok.
 
@@ -332,7 +341,8 @@ subscribe_payload(<<"htx">>, Symbol) ->
     Contract = htx_symbol(Symbol),
     arbiguard_json:encode(#{sub => <<"market.", Contract/binary, ".bbo">>, id => Symbol});
 subscribe_payload(<<"weex">>, Symbol) ->
-    arbiguard_json:encode(#{op => <<"subscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
+    Stream = <<(norm_symbol(Symbol))/binary, "@depth15">>,
+    arbiguard_json:encode(#{method => <<"SUBSCRIBE">>, params => [Stream], id => erlang:unique_integer([positive])});
 subscribe_payload(_, _Symbol) ->
     undefined.
 
@@ -348,10 +358,15 @@ unsubscribe_payload(<<"htx">>, Symbol) ->
     Contract = htx_symbol(Symbol),
     arbiguard_json:encode(#{unsub => <<"market.", Contract/binary, ".bbo">>, id => Symbol});
 unsubscribe_payload(<<"weex">>, Symbol) ->
-    arbiguard_json:encode(#{op => <<"unsubscribe">>, args => [#{instType => <<"mc">>, channel => <<"ticker">>, instId => Symbol}]});
+    Stream = <<(norm_symbol(Symbol))/binary, "@depth15">>,
+    arbiguard_json:encode(#{method => <<"UNSUBSCRIBE">>, params => [Stream], id => erlang:unique_integer([positive])});
 unsubscribe_payload(_, _Symbol) ->
     undefined.
 
+handle_ws_payload(<<"ping">>, #state{ws_conn = ConnPid, ws_stream = StreamRef}) ->
+    catch gun:ws_send(ConnPid, StreamRef, {text, <<"pong">>});
+handle_ws_payload(<<"pong">>, _State) ->
+    ok;
 handle_ws_payload(Data, State) ->
     case decode_ws(Data) of
         {ok, Msg} -> 
@@ -441,26 +456,44 @@ maybe_write_ticker(Msg, State = #state{id = <<"htx">> = ID}) ->
     Mark = arbiguard_util:to_float(map_get_any([mark_price, markPrice, <<"mark_price">>, <<"markPrice">>], Tick, 0), 0),
     case Symbol of <<"">> -> ok; _ -> write_ticker(ID, Symbol, Bid, Ask, BidQty, AskQty, Last, Mark, <<"ws_bbo">>, State) end;
 maybe_write_ticker(Msg, State = #state{id = <<"weex">> = ID}) ->
-    Rows = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
-    [write_ticker(ID,
-                  map_get_any([symbol, instId, <<"symbol">>, <<"instId">>], Row, <<"">>),
-                  arbiguard_util:to_float(map_get_any([bidPr, bid, bidPx, bestBid, <<"bidPr">>, <<"bid">>, <<"bidPx">>, <<"bestBid">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([askPr, ask, askPx, bestAsk, <<"askPr">>, <<"ask">>, <<"askPx">>, <<"bestAsk">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([bidSz, bidSize, bidQty, <<"bidSz">>, <<"bidSize">>, <<"bidQty">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([askSz, askSize, askQty, <<"askSz">>, <<"askSize">>, <<"askQty">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([lastPr, last, lastPrice, <<"lastPr">>, <<"last">>, <<"lastPrice">>], Row, 0), 0),
-                  arbiguard_util:to_float(map_get_any([markPrice, mark_price, markPx, <<"markPrice">>, <<"mark_price">>, <<"markPx">>], Row, 0), 0),
-                  <<"ws_ticker">>,
-                  State)
-     || Row <- Rows],
-    ok;
+    case map_get_any([e, <<"e">>], Msg, <<"">>) of
+        <<"depth">> ->
+            write_ticker(ID,
+                         map_get_any([s, <<"s">>], Msg, <<"">>),
+                         side_price(map_get_any([b, <<"b">>], Msg, [])),
+                         side_price(map_get_any([a, <<"a">>], Msg, [])),
+                         side_qty(map_get_any([b, <<"b">>], Msg, [])),
+                         side_qty(map_get_any([a, <<"a">>], Msg, [])),
+                         0,
+                         0,
+                         <<"ws_depth15">>,
+                         State);
+        _ ->
+            Rows = rows_from_value(map_get_any([data, <<"data">>], Msg, [])),
+            [write_ticker(ID,
+                          map_get_any([symbol, instId, <<"symbol">>, <<"instId">>], Row, <<"">>),
+                          arbiguard_util:to_float(map_get_any([bidPr, bid, bidPx, bestBid, <<"bidPr">>, <<"bid">>, <<"bidPx">>, <<"bestBid">>], Row, 0), 0),
+                          arbiguard_util:to_float(map_get_any([askPr, ask, askPx, bestAsk, <<"askPr">>, <<"ask">>, <<"askPx">>, <<"bestAsk">>], Row, 0), 0),
+                          arbiguard_util:to_float(map_get_any([bidSz, bidSize, bidQty, <<"bidSz">>, <<"bidSize">>, <<"bidQty">>], Row, 0), 0),
+                          arbiguard_util:to_float(map_get_any([askSz, askSize, askQty, <<"askSz">>, <<"askSize">>, <<"askQty">>], Row, 0), 0),
+                          arbiguard_util:to_float(map_get_any([lastPr, last, lastPrice, <<"lastPr">>, <<"last">>, <<"lastPrice">>], Row, 0), 0),
+                          arbiguard_util:to_float(map_get_any([markPrice, mark_price, markPx, <<"markPrice">>, <<"mark_price">>, <<"markPx">>], Row, 0), 0),
+                          <<"ws_ticker_fallback">>,
+                          State)
+             || Row <- Rows],
+            ok
+    end;
 maybe_write_ticker(_Msg, _State) ->
     ok.
 
 write_ticker(ID, Symbol0, Bid, Ask, BidQty, AskQty, Last, Mark0, MarkSource, State) ->
     Symbol = norm_symbol(Symbol0),
     Prev = case arbiguard_ets:get_ticker(ID, Symbol) of {ok, PrevRow} -> PrevRow; _ -> #{} end,
-    TradeMid = trade_mid(Bid, Ask, Last),
+    Bid1 = positive_or_prev(Bid, maps:get(bid, Prev, 0)),
+    Ask1 = positive_or_prev(Ask, maps:get(ask, Prev, 0)),
+    BidQty1 = positive_or_prev(BidQty, maps:get(bid_size, Prev, 0)),
+    AskQty1 = positive_or_prev(AskQty, maps:get(ask_size, Prev, 0)),
+    TradeMid = trade_mid(Bid1, Ask1, Last),
     Mark = case Mark0 > 0 of
         true -> Mark0;
         false -> maps:get(mark_price, Prev, 0)
@@ -471,12 +504,12 @@ write_ticker(ID, Symbol0, Bid, Ask, BidQty, AskQty, Last, Mark0, MarkSource, Sta
     end,
     Row = Prev#{exchange => ID,
                 symbol => Symbol,
-                bid => Bid,
-                ask => Ask,
-                bid_size => BidQty,
-                ask_size => AskQty,
-                bid_levels => levels(Bid, BidQty),
-                ask_levels => levels(Ask, AskQty),
+                bid => Bid1,
+                ask => Ask1,
+                bid_size => BidQty1,
+                ask_size => AskQty1,
+                bid_levels => levels(Bid1, BidQty1),
+                ask_levels => levels(Ask1, AskQty1),
                 last_price => Last,
                 trade_mid_price => TradeMid,
                 mark_price => Mark,
@@ -497,6 +530,33 @@ forward_ticker(Row, #state{subscriptions = Subs}) ->
     maybe_send_ticker(maps:get(open_execution_order, ReasonMap, []), Row),
     maybe_send_ticker(maps:get(close_execution_order, ReasonMap, []), Row),
     ok.
+
+subscription_status_map(Symbol, State = #state{subscriptions = Subs}) ->
+    ReasonMap = normalize_subscription(maps:get(Symbol, Subs, #{})),
+    Ticker = case arbiguard_ets:get_ticker(State#state.id, Symbol) of
+        {ok, Row} -> Row;
+        _ -> #{}
+    end,
+    #{exchange => State#state.id,
+      symbol => Symbol,
+      ws_enabled => State#state.ws_enabled,
+      ws_connected => State#state.ws_connected,
+      ws_status => State#state.ws_status,
+      ws_error => State#state.ws_error,
+      subscribed => map_size(ReasonMap) > 0,
+      ws_subscribed => has_exchange_ws_reason(maps:keys(ReasonMap)),
+      reasons => maps:keys(ReasonMap),
+      subscriber_count => lists:sum([length(Pids) || {_Reason, Pids} <- maps:to_list(ReasonMap)]),
+      has_ticker => map_size(Ticker) > 0,
+      bid => maps:get(bid, Ticker, 0),
+      ask => maps:get(ask, Ticker, 0),
+      updated_at => maps:get(updated_at, Ticker, 0),
+      ticker_age_ms => ticker_age_ms(maps:get(updated_at, Ticker, 0))}.
+
+ticker_age_ms(UpdatedAt) when is_integer(UpdatedAt), UpdatedAt > 0 ->
+    max(0, arbiguard_util:now_ms() - UpdatedAt);
+ticker_age_ms(_) ->
+    0.
 
 maybe_send_ticker(Subscribers, Row) ->
     [Pid ! {ticker_update, Row} || Pid <- Subscribers, is_pid(Pid)],
@@ -569,6 +629,11 @@ levels(Price, Qty) when Price > 0, Qty > 0 ->
     [#{price => Price, qty => Qty, notional => Price * Qty}];
 levels(_Price, _Qty) ->
     [].
+
+positive_or_prev(Value, _Prev) when Value > 0 ->
+    Value;
+positive_or_prev(_Value, Prev) ->
+    Prev.
 
 normalize_subscription(Subscription) when is_map(Subscription) ->
     maps:map(fun(_Reason, Pids) -> normalize_pids(Pids) end, Subscription);

@@ -192,7 +192,7 @@ maybe_open(Paper, Req, Op) ->
         true -> Paper;
         false ->
             Notional = maps:get(suggested_notional, Op, max_position(Req)),
-            MinProfit = maps:get(min_execution_profit_usdt, Req, 5.0),
+            MinProfit = maps:get(min_execution_profit_usdt, Req, 10.0),
             ExpectedProfit = maps:get(estimated_net_profit, Op, 0.0),
             case ExpectedProfit >= MinProfit of
                 true -> open_position(Paper, Req, Key, Op, Notional);
@@ -262,7 +262,7 @@ open_position(Paper, Req, Key, Op, Notional) ->
                     updated_at => Now,
                     close_threshold => maps:get(price_gap_close_profit_usdt, Req, 10),
                     last_opportunity_method => maps:get(arbitrage_method, Op, <<"">>)},
-            Trade = #{time => Now,
+            Trade0 = #{time => Now,
                       action => <<"open">>,
                       account_mode => maps:get(mode, Account),
                       account_id => maps:get(id, Account),
@@ -282,6 +282,7 @@ open_position(Paper, Req, Key, Op, Notional) ->
                       net_pnl => -OpenFee,
                       expected_net_profit => maps:get(estimated_net_profit, Op, 0),
                       reason => <<"paper_open_priority">>},
+            Trade = persist_trade(Trade0),
             Bal = Bal0#{LongEx => maps:get(LongEx, Bal0, 0) - LongNeed,
                         ShortEx => maps:get(ShortEx, Bal0, 0) - ShortNeed},
             Positions = maps:get(positions, Paper, #{}),
@@ -315,7 +316,7 @@ close_position(Paper, Key, Position, Reason) ->
     Bal0 = maps:get(exchange_balances, Paper, #{}),
     Bal = Bal0#{LongEx => maps:get(LongEx, Bal0, 0) + LongMargin + PricePNL / 2 + FundingPNL / 2 - CloseFee / 2,
                 ShortEx => maps:get(ShortEx, Bal0, 0) + ShortMargin + PricePNL / 2 + FundingPNL / 2 - CloseFee / 2},
-    Trade = #{time => arbiguard_util:now_ms(),
+    Trade0 = #{time => arbiguard_util:now_ms(),
               action => <<"close">>,
               account_mode => maps:get(account_mode, Pos, <<"paper">>),
               account_id => maps:get(account_id, Pos, <<"paper-main">>),
@@ -337,6 +338,7 @@ close_position(Paper, Key, Position, Reason) ->
               net_pnl => NetPNL,
               expected_net_profit => maps:get(expected_net_profit, Pos, 0),
               reason => Reason},
+    Trade = persist_trade(Trade0),
     Logs = [Trade | maps:get(logs, Paper, [])],
     Paper#{exchange_balances => Bal,
            positions => maps:remove(Key, Positions0),
@@ -379,13 +381,86 @@ refresh_equity(Paper) ->
 paper_snapshot(Paper) ->
     Positions = [P || {_K, P} <- maps:to_list(maps:get(positions, Paper, #{}))],
     Logs = maps:get(logs, Paper, []),
+    AccountMode = <<"paper">>,
+    AccountID = <<"paper-main">>,
+    StoreStats = arbiguard_trade_store:stats(#{account_mode => AccountMode, account_id => AccountID}),
     Paper#{
         positions => Positions,
         logs => Logs,
-        pair_stats => pair_stats(Positions, Logs),
+        trade_history => maps:get(trades, arbiguard_trade_store:page(#{account_mode => AccountMode, account_id => AccountID,
+                                                                        page => 1, page_size => 200}), []),
+        trade_page => arbiguard_trade_store:page(#{account_mode => AccountMode, account_id => AccountID,
+                                                   page => 1, page_size => 50}),
+        profit_breakdown => merge_persisted_profit(maps:get(profit_breakdown, StoreStats, #{}), Positions, Paper),
+        pair_stats => merge_persisted_pair_stats(maps:get(pair_stats, StoreStats, []), Positions),
         exchange_equity => exchange_equity(Paper),
         exchange_margin => exchange_margin(Paper),
         exchange_unrealized_pnl => exchange_unrealized_pnl(Paper)
+    }.
+
+persist_trade(Trade) ->
+    case maps:get(action, Trade, <<"">>) of
+        <<"open">> -> arbiguard_trade_store:write(Trade);
+        <<"close">> -> arbiguard_trade_store:write(Trade);
+        _ -> Trade
+    end.
+
+merge_persisted_profit(Persisted0, Positions, Paper) ->
+    Persisted = case map_size(Persisted0) of
+        0 -> profit_breakdown([], [], Paper#{realized_pnl => 0.0, unrealized_pnl => 0.0});
+        _ -> Persisted0
+    end,
+    UnrealizedNet = maps:get(unrealized_pnl, Paper, 0.0),
+    UnrealizedPrice = lists:sum([maps:get(price_pnl, P, 0) || P <- Positions]),
+    UnrealizedFunding = lists:sum([maps:get(funding_pnl, P, 0) || P <- Positions]),
+    EstimatedCloseFee = lists:sum([estimated_close_fee(P) || P <- Positions]),
+    RealizedNet = maps:get(realized_net_pnl, Persisted, maps:get(net_pnl, Persisted, 0.0)),
+    RealizedPrice = maps:get(realized_price_pnl, Persisted, maps:get(price_pnl, Persisted, 0.0)),
+    RealizedFunding = maps:get(realized_funding_pnl, Persisted, maps:get(funding_pnl, Persisted, 0.0)),
+    OpenFee = maps:get(open_fee, Persisted, 0.0),
+    CloseFee = maps:get(close_fee, Persisted, 0.0),
+    Slippage = maps:get(slippage_pnl, Persisted, 0.0) + sum_any_field(Positions, slippage_pnl),
+    Rollback = maps:get(rollback_pnl, Persisted, 0.0) + sum_any_field(Positions, rollback_pnl),
+    Liquidation = maps:get(liquidation_pnl, Persisted, 0.0) + sum_any_field(Positions, liquidation_pnl),
+    Persisted#{
+        net_pnl => RealizedNet + UnrealizedNet,
+        realized_net_pnl => RealizedNet,
+        unrealized_net_pnl => UnrealizedNet,
+        price_pnl => RealizedPrice + UnrealizedPrice,
+        realized_price_pnl => RealizedPrice,
+        unrealized_price_pnl => UnrealizedPrice,
+        funding_pnl => RealizedFunding + UnrealizedFunding,
+        realized_funding_pnl => RealizedFunding,
+        unrealized_funding_pnl => UnrealizedFunding,
+        estimated_close_fee => EstimatedCloseFee,
+        total_fee => OpenFee + CloseFee + EstimatedCloseFee,
+        slippage_pnl => Slippage,
+        rollback_pnl => Rollback,
+        liquidation_pnl => Liquidation,
+        position_count => length(Positions)
+    }.
+
+merge_persisted_pair_stats(Persisted, Positions) ->
+    Keys = lists:usort([maps:get(pair, S, <<"">>) || S <- Persisted] ++ [pair_key(P) || P <- Positions]),
+    [merge_pair_stat(K, Persisted, Positions) || K <- Keys, K =/= <<"">>].
+
+merge_pair_stat(K, Persisted, Positions) ->
+    Base = case [S || S <- Persisted, maps:get(pair, S, <<"">>) =:= K] of
+        [S0 | _] -> S0;
+        [] -> #{pair => K, net_pnl => 0.0, funding_pnl => 0.0, price_pnl => 0.0,
+                slippage_pnl => 0.0, rollback_pnl => 0.0, liquidation_pnl => 0.0,
+                open_fee => 0.0, close_fee => 0.0, total_fee => 0.0,
+                trade_count => 0, position_count => 0}
+    end,
+    Ps = [P || P <- Positions, pair_key(P) =:= K],
+    Base#{
+        net_pnl => maps:get(net_pnl, Base, 0.0) + lists:sum([maps:get(unrealized_pnl, P, 0) || P <- Ps]),
+        funding_pnl => maps:get(funding_pnl, Base, 0.0) + lists:sum([maps:get(funding_pnl, P, 0) || P <- Ps]),
+        price_pnl => maps:get(price_pnl, Base, 0.0) + lists:sum([maps:get(price_pnl, P, 0) || P <- Ps]),
+        slippage_pnl => maps:get(slippage_pnl, Base, 0.0) + sum_any_field(Ps, slippage_pnl),
+        rollback_pnl => maps:get(rollback_pnl, Base, 0.0) + sum_any_field(Ps, rollback_pnl),
+        liquidation_pnl => maps:get(liquidation_pnl, Base, 0.0) + sum_any_field(Ps, liquidation_pnl),
+        position_count => length(Ps)
     }.
 
 position_by_id(ID, Snapshot) ->
@@ -394,20 +469,44 @@ position_by_id(ID, Snapshot) ->
         [] -> undefined
     end.
 
-pair_stats(Positions, Logs) ->
-    Keys = lists:usort([pair_key(P) || P <- Positions] ++ [pair_key(L) || L <- Logs, maps:get(action, L, <<"">>) =/= <<"skip">>]),
-    [pair_stat(K, Positions, Logs) || K <- Keys].
+profit_breakdown(Positions, Logs, Paper) ->
+    RealizedNet = maps:get(realized_pnl, Paper, 0.0),
+    UnrealizedNet = maps:get(unrealized_pnl, Paper, 0.0),
+    RealizedPrice = lists:sum([maps:get(price_pnl, L, 0) || L <- Logs]),
+    RealizedFunding = lists:sum([maps:get(funding_pnl, L, 0) || L <- Logs]),
+    UnrealizedPrice = lists:sum([maps:get(price_pnl, P, 0) || P <- Positions]),
+    UnrealizedFunding = lists:sum([maps:get(funding_pnl, P, 0) || P <- Positions]),
+    OpenFee = sum_action_field(Logs, <<"open">>, open_fee),
+    CloseFee = sum_action_field(Logs, <<"close">>, close_fee),
+    EstimatedCloseFee = lists:sum([estimated_close_fee(P) || P <- Positions]),
+    Slippage = sum_any_field(Logs, slippage_pnl) + sum_any_field(Positions, slippage_pnl),
+    Rollback = sum_any_field(Logs, rollback_pnl) + sum_any_field(Positions, rollback_pnl),
+    Liquidation = sum_any_field(Logs, liquidation_pnl) + sum_any_field(Positions, liquidation_pnl),
+    Accounted = RealizedPrice + UnrealizedPrice + RealizedFunding + UnrealizedFunding +
+                Slippage + Rollback + Liquidation - OpenFee - CloseFee - EstimatedCloseFee,
+    #{net_pnl => RealizedNet + UnrealizedNet,
+      realized_net_pnl => RealizedNet,
+      unrealized_net_pnl => UnrealizedNet,
+      price_pnl => RealizedPrice + UnrealizedPrice,
+      realized_price_pnl => RealizedPrice,
+      unrealized_price_pnl => UnrealizedPrice,
+      funding_pnl => RealizedFunding + UnrealizedFunding,
+      realized_funding_pnl => RealizedFunding,
+      unrealized_funding_pnl => UnrealizedFunding,
+      open_fee => OpenFee,
+      close_fee => CloseFee,
+      estimated_close_fee => EstimatedCloseFee,
+      total_fee => OpenFee + CloseFee + EstimatedCloseFee,
+      slippage_pnl => Slippage,
+      rollback_pnl => Rollback,
+      liquidation_pnl => Liquidation,
+      other_pnl => RealizedNet + UnrealizedNet - Accounted}.
 
-pair_stat(K, Positions, Logs) ->
-    Ps = [P || P <- Positions, pair_key(P) =:= K],
-    Ls = [L || L <- Logs, pair_key(L) =:= K],
-    #{pair => K,
-      net_pnl => lists:sum([maps:get(net_pnl, L, 0) || L <- Ls]) + lists:sum([maps:get(unrealized_pnl, P, 0) || P <- Ps]),
-      funding_pnl => lists:sum([maps:get(funding_pnl, L, 0) || L <- Ls]) + lists:sum([maps:get(funding_pnl, P, 0) || P <- Ps]),
-      price_pnl => lists:sum([maps:get(price_pnl, L, 0) || L <- Ls]) + lists:sum([maps:get(price_pnl, P, 0) || P <- Ps]),
-      open_fee => lists:sum([maps:get(open_fee, L, 0) || L <- Ls]),
-      close_fee => lists:sum([maps:get(close_fee, L, 0) || L <- Ls]),
-      position_count => length(Ps)}.
+sum_action_field(Items, Action, Field) ->
+    lists:sum([maps:get(Field, Item, 0) || Item <- Items, maps:get(action, Item, <<"">>) =:= Action]).
+
+sum_any_field(Items, Field) ->
+    lists:sum([maps:get(Field, Item, 0) || Item <- Items]).
 
 exchange_equity(Paper) ->
     Bal = maps:get(exchange_balances, Paper, #{}),

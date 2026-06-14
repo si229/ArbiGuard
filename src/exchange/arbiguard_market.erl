@@ -166,18 +166,22 @@ htx_row(Exchange, I, Contracts, Prices) ->
 
 fetch_weex(Exchange) ->
     Base = trim_right(maps:get(base_url, Exchange, <<"https://api-contract.weex.com">>)),
-    case {http_json(<<Base/binary, "/capi/v3/market/ticker/24hr">>),
+    case {weex_api_trading_symbols(Base),
+          http_json(<<Base/binary, "/capi/v3/market/ticker/24hr">>),
           http_json(<<Base/binary, "/capi/v3/market/premiumIndex">>)} of
-        {{ok, Tickers0}, {ok, Premiums0}} ->
-            Tickers = unwrap_list(Tickers0),
-            Premiums = maps:from_list([{normalize_symbol(maps:get(symbol, P, <<"">>)), P} || P <- unwrap_list(Premiums0)]),
-            Rows = [weex_row(Exchange, T, Premiums) || T <- Tickers],
+        {{ok, Tradable}, {ok, Tickers0}, {ok, Premiums0}} ->
+            Tickers = [T || T <- unwrap_list(Tickers0), weex_tradable_ticker(T, Tradable)],
+            Premiums = maps:from_list([{normalize_symbol(maps:get(symbol, P, <<"">>)), P} ||
+                                           P <- unwrap_list(Premiums0),
+                                           maps:is_key(normalize_symbol(maps:get(symbol, P, <<"">>)), Tradable)]),
+            Rows = [weex_row(Exchange, T, Premiums, Tradable) || T <- Tickers],
             {ok, [R || R <- Rows, maps:get(symbol, R, <<"">>) =/= <<"">>, maps:get(mark_price, R, 0) > 0]};
-        {{error, Reason}, _} -> {error, {ticker_failed, Reason}};
-        {_, {error, Reason}} -> {error, {premium_failed, Reason}}
+        {{error, Reason}, _, _} -> {error, {api_trading_symbols_failed, Reason}};
+        {_, {error, Reason}, _} -> {error, {ticker_failed, Reason}};
+        {_, _, {error, Reason}} -> {error, {premium_failed, Reason}}
     end.
 
-weex_row(Exchange, T, Premiums) ->
+weex_row(Exchange, T, Premiums, Tradable) ->
     Raw = maps:get(symbol, T, maps:get(instId, T, <<"">>)),
     Symbol = normalize_symbol(Raw),
     Premium = maps:get(Symbol, Premiums, #{}),
@@ -199,7 +203,22 @@ weex_row(Exchange, T, Premiums) ->
       taker_fee_rate => f(maps:get(taker_fee_rate, Exchange, 0.0006), 0.0006),
       quote_volume => f(maps:get(quoteVolume, T, maps:get(volume, T, 0)), 0),
       delist_time => positive_int(delist_time(T), delist_time(Premium)),
+      api_trading => maps:is_key(Symbol, Tradable),
       updated_at => arbiguard_util:now_ms()}, Exchange).
+
+weex_api_trading_symbols(Base) ->
+    case http_json(<<Base/binary, "/capi/v3/market/apiTradingSymbols">>) of
+        {ok, Symbols0} ->
+            Symbols = [normalize_symbol(S) || S <- unwrap_list(Symbols0)],
+            {ok, maps:from_list([{S, true} || S <- Symbols, S =/= <<"">>])};
+        Error -> Error
+    end.
+
+weex_tradable_ticker(_Ticker, Tradable) when map_size(Tradable) =:= 0 ->
+    false;
+weex_tradable_ticker(Ticker, Tradable) ->
+    Raw = maps:get(symbol, Ticker, maps:get(instId, Ticker, <<"">>)),
+    maps:is_key(normalize_symbol(Raw), Tradable).
 
 http_json(UrlBin) ->
     Url = binary_to_list(UrlBin),

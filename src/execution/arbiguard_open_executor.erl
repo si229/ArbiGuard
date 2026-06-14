@@ -4,7 +4,7 @@
 -export([start_link/0, notify_opportunities/2, submit_order/2, reset/0, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {orders = #{}, last_opportunities = [], last_notify = 0, ticker_cache = #{}}).
+-record(state, {orders = #{}, last_opportunities = [], last_notify = 0, ticker_cache = #{}, last_rejects = []}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -30,10 +30,11 @@ handle_call({submit_order, Req, Opportunity}, _From, State) ->
 handle_call(reset, _From, State = #state{orders = Orders}) ->
     _ = [unsubscribe_order_symbols(Order) || {_ID, Order} <- maps:to_list(Orders)],
     {reply, #{ok => true, cleared_open_orders => maps:size(Orders)},
-     State#state{orders = #{}, last_opportunities = [], ticker_cache = #{}}};
+     State#state{orders = #{}, last_opportunities = [], ticker_cache = #{}, last_rejects = []}};
 handle_call(snapshot, _From, State) ->
     {reply, #{orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_opportunities => State#state.last_opportunities,
+              open_rejects => State#state.last_rejects,
               last_notify => State#state.last_notify,
               ticker_cache_size => maps:size(State#state.ticker_cache)}, State};
 handle_call(_Req, _From, State) ->
@@ -45,7 +46,9 @@ handle_cast({opportunities, Req, Result}, State) ->
     CurrentIDs = opportunity_id_set(Req1, Opportunities),
     PrunedState = prune_stale_waiting_orders(CurrentIDs, State),
     NewState = lists:foldl(fun(Op, Acc) -> maybe_create_execution_order(Req1, Op, Acc) end, PrunedState, Opportunities),
-    {noreply, NewState#state{last_opportunities = Opportunities, last_notify = arbiguard_util:now_ms()}};
+    {noreply, NewState#state{last_opportunities = Opportunities,
+                              last_rejects = trim_rejects(NewState#state.last_rejects),
+                              last_notify = arbiguard_util:now_ms()}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -77,11 +80,13 @@ code_change(_OldVsn, State, _Extra) ->
 
 maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
     Req1 = arbiguard_calc:normalize_request(Req),
-    MinProfit = maps:get(min_execution_profit_usdt, Req1, 5.0),
+    MinProfit = maps:get(min_execution_profit_usdt, Req1, 10.0),
     MaxOpen = maps:get(max_open_positions, Req1, 5),
     ID = order_key(Req1, Op),
     CanOpenMore = can_create_more_orders(MaxOpen, Orders),
-    case CanOpenMore andalso maps:get(estimated_net_profit, Op, 0) >= MinProfit andalso not maps:is_key(ID, Orders) of
+    Profit = maps:get(estimated_net_profit, Op, 0.0),
+    Duplicate = maps:is_key(ID, Orders),
+    case CanOpenMore andalso Profit >= MinProfit andalso not Duplicate of
         true ->
             subscribe_order_symbols(Op),
             Order = (order_plan(Req1, Op))#{status => <<"waiting_ws_ticker">>,
@@ -89,7 +94,7 @@ maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
                                            opportunity => Op},
             maybe_dispatch_ready_orders(State#state{orders = Orders#{ID => Order}});
         false ->
-            State
+            remember_reject(State, reject_reason(CanOpenMore, Duplicate, Profit, MinProfit), Req1, Op)
     end.
 
 can_create_more_orders(MaxOpen, _Orders) when MaxOpen =< 0 ->
@@ -132,17 +137,59 @@ prune_stale_waiting_orders(CurrentIDs, State = #state{orders = Orders}) ->
     State#state{orders = Kept}.
 
 should_prune_order(ID, Order, CurrentIDs) ->
-    (not maps:is_key(ID, CurrentIDs))
-        andalso prunable_status(maps:get(status, Order, <<"">>))
-        andalso stale_wait_expired(Order).
+    Status = maps:get(status, Order, <<"">>),
+    case terminal_open_status(Status) of
+        true ->
+            terminal_order_expired(Order);
+        false ->
+            (not maps:is_key(ID, CurrentIDs))
+                andalso prunable_status(Status)
+                andalso stale_wait_expired(Order)
+    end.
 
 prunable_status(<<"waiting_ws_ticker">>) -> true;
 prunable_status(_Status) -> false.
+
+terminal_open_status(<<"filled_paper_open">>) -> true;
+terminal_open_status(<<"filled_live_open">>) -> true;
+terminal_open_status(<<"submitted_live_rejected">>) -> true;
+terminal_open_status(<<"ticker_unavailable">>) -> true;
+terminal_open_status(_) -> false.
 
 stale_wait_expired(Order) ->
     GraceMs = arbiguard_util:to_int(application:get_env(arbiguard, execution_order_stale_grace_ms, 15000), 15000),
     CreatedAt = arbiguard_util:to_int(maps:get(created_at, Order, 0), 0),
     CreatedAt =:= 0 orelse arbiguard_util:now_ms() - CreatedAt >= GraceMs.
+
+terminal_order_expired(Order) ->
+    GraceMs = arbiguard_util:to_int(application:get_env(arbiguard, execution_order_terminal_grace_ms, 60000), 60000),
+    DoneAt0 = arbiguard_util:to_int(maps:get(filled_at, Order, maps:get(submitted_at, Order, 0)), 0),
+    DoneAt = case DoneAt0 > 0 of
+        true -> DoneAt0;
+        false -> arbiguard_util:to_int(maps:get(created_at, Order, 0), 0)
+    end,
+    DoneAt =:= 0 orelse arbiguard_util:now_ms() - DoneAt >= GraceMs.
+
+reject_reason(false, _Duplicate, _Profit, _MinProfit) -> <<"max_open_positions_reached">>;
+reject_reason(_CanOpenMore, true, _Profit, _MinProfit) -> <<"duplicate_open_order">>;
+reject_reason(_CanOpenMore, _Duplicate, Profit, MinProfit) when Profit < MinProfit -> <<"profit_below_min_execution_profit">>;
+reject_reason(_CanOpenMore, _Duplicate, _Profit, _MinProfit) -> <<"open_filter_rejected">>.
+
+remember_reject(State = #state{last_rejects = Rejects}, Reason, Req, Op) ->
+    Reject = #{time => arbiguard_util:now_ms(),
+               reason => Reason,
+               symbol => maps:get(symbol, Op, <<"">>),
+               long_exchange => maps:get(long_exchange, Op, <<"">>),
+               short_exchange => maps:get(short_exchange, Op, <<"">>),
+               estimated_net_profit => maps:get(estimated_net_profit, Op, 0.0),
+               min_execution_profit_usdt => maps:get(min_execution_profit_usdt, Req, 10.0),
+               max_open_positions => maps:get(max_open_positions, Req, 5),
+               current_positions => paper_position_count(),
+               active_open_orders => active_open_order_count(State#state.orders)},
+    State#state{last_rejects = trim_rejects([Reject | Rejects])}.
+
+trim_rejects(Rejects) ->
+    lists:sublist(Rejects, 50).
 
 create_order(Req, Op, State = #state{orders = Orders}) ->
     Req1 = arbiguard_calc:normalize_request(Req),
@@ -322,12 +369,51 @@ maybe_submit_from_ticker_1(Order, Cache) ->
             DispatchNotional = maps:get(suggested_notional, Op, maps:get(target_notional, Order1, 0.0)),
             dispatch_order(Req, Order1#{submit_notional => DispatchNotional}, Op);
         {wait, WaitInfo} ->
-            Order#{wait_reason => maps:get(reason, WaitInfo, <<"waiting_ws_ticker">>),
-                   wait_detail => WaitInfo,
-                   wait_checked_at => arbiguard_util:now_ms()};
+            maybe_timeout_waiting_order(
+              Order#{wait_reason => maps:get(reason, WaitInfo, <<"waiting_ws_ticker">>),
+                     wait_detail => enrich_wait_detail(Order, WaitInfo),
+                     wait_checked_at => arbiguard_util:now_ms()});
         wait ->
-            Order#{wait_reason => <<"waiting_ws_ticker">>,
-                   wait_checked_at => arbiguard_util:now_ms()}
+            maybe_timeout_waiting_order(
+              Order#{wait_reason => <<"waiting_ws_ticker">>,
+                     wait_detail => enrich_wait_detail(Order, #{}),
+                     wait_checked_at => arbiguard_util:now_ms()})
+    end.
+
+maybe_timeout_waiting_order(Order) ->
+    Now = arbiguard_util:now_ms(),
+    CreatedAt = arbiguard_util:to_int(maps:get(created_at, Order, 0), 0),
+    TimeoutMs = arbiguard_util:to_int(application:get_env(arbiguard, execution_ticker_wait_timeout_ms, 20000), 20000),
+    case CreatedAt > 0 andalso Now - CreatedAt >= TimeoutMs of
+        true ->
+            lager:warning("open executor ticker unavailable timeout symbol=~s long=~s short=~s reason=~s timeout_ms=~p detail=~p",
+                          [maps:get(symbol, Order, <<"">>), maps:get(long_exchange, Order, <<"">>),
+                           maps:get(short_exchange, Order, <<"">>), maps:get(wait_reason, Order, <<"">>),
+                           TimeoutMs, maps:get(wait_detail, Order, #{})]),
+            unsubscribe_order_symbols(Order),
+            Order#{status => <<"ticker_unavailable">>,
+                   finished_at => Now,
+                   wait_reason => <<"ticker_unavailable_timeout">>,
+                   remaining_notional => remaining_to_submit(Order)};
+        false ->
+            Order
+    end.
+
+enrich_wait_detail(Order, WaitInfo) ->
+    Symbol = maps:get(symbol, Order, maps:get(symbol, WaitInfo, <<"">>)),
+    LongEx = maps:get(long_exchange, Order, maps:get(long_exchange, WaitInfo, <<"">>)),
+    ShortEx = maps:get(short_exchange, Order, maps:get(short_exchange, WaitInfo, <<"">>)),
+    LongSub = safe_subscription_status(LongEx, Symbol),
+    ShortSub = safe_subscription_status(ShortEx, Symbol),
+    WaitInfo#{long_subscription => LongSub,
+              short_subscription => ShortSub,
+              wait_age_ms => max(0, arbiguard_util:now_ms() - arbiguard_util:to_int(maps:get(created_at, Order, 0), 0)),
+              ticker_wait_timeout_ms => arbiguard_util:to_int(application:get_env(arbiguard, execution_ticker_wait_timeout_ms, 20000), 20000)}.
+
+safe_subscription_status(Exchange, Symbol) ->
+    case catch arbiguard_exchange_ticker:subscription_status(Exchange, Symbol) of
+        Status when is_map(Status) -> Status;
+        Error -> #{exchange => Exchange, symbol => Symbol, error => Error}
     end.
 
 apply_remaining_notional(Op, Order) ->
@@ -511,7 +597,7 @@ next_settlement_return(Op) ->
     end.
 
 require_profitable(Op, Req) ->
-    MinProfit = maps:get(min_execution_profit_usdt, Req, 5.0),
+    MinProfit = maps:get(min_execution_profit_usdt, Req, 10.0),
     case maps:get(estimated_net_profit, Op, 0.0) >= MinProfit of
         true -> {ok, Op};
         false ->

@@ -21,7 +21,7 @@ normalize_request(Req0) ->
         fast_refresh_sec => f(maps:get(fast_refresh_sec, Req1, 1), 1),
         limit => arbiguard_util:to_int(maps:get(limit, Req1, 30), 30),
         paper_leverage => f(maps:get(paper_leverage, Req1, 10), 10),
-        min_execution_profit_usdt => f(maps:get(min_execution_profit_usdt, Req1, 5), 5),
+        min_execution_profit_usdt => f(maps:get(min_execution_profit_usdt, Req1, 10), 10),
         price_gap_close_profit_usdt => f(maps:get(price_gap_close_profit_usdt, Req1, 10), 10),
         execution_order_mode => maps:get(execution_order_mode, Req1, <<"fok">>),
         exchanges => normalize_exchanges(maps:get(exchanges, Req1, default_exchanges()))
@@ -45,7 +45,7 @@ default_exchanges() ->
        base_url => <<"https://api.gateio.ws/api/v4">>,
        ws_host => <<"fx-ws.gateio.ws">>, ws_port => 443, ws_path => <<"/v4/ws/usdt">>,
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0005, funding_interval_hours => 8},
-     #{id => <<"weex">>, name => <<"WEEX">>, enabled => false,
+     #{id => <<"weex">>, name => <<"WEEX">>, enabled => true,
        base_url => <<"https://api-contract.weex.com">>,
        ws_host => <<"ws-contract.weex.com">>, ws_port => 443, ws_path => <<"/v3/ws/public">>,
        maker_fee_rate => 0.0002, taker_fee_rate => 0.0006, funding_interval_hours => 8},
