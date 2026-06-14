@@ -2,8 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1, snapshot/0, reset_paper/1, submit_scan/2, apply_open_order/3, apply_close_order/3,
-         update_position/1,
-         set_exchange_token/2, get_exchange_token/1]).
+         update_position/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {paper}).
@@ -28,12 +27,6 @@ apply_close_order(Req, Order, Position) ->
 
 update_position(Position) ->
     gen_server:call(?MODULE, {update_position, Position}).
-
-set_exchange_token(ExchangeID, TokenConfig) ->
-    gen_server:call(?MODULE, {set_exchange_token, ExchangeID, TokenConfig}).
-
-get_exchange_token(ExchangeID) ->
-    gen_server:call(?MODULE, {get_exchange_token, ExchangeID}).
 
 init([Capital]) ->
     {ok, #state{paper = new_paper(Capital)}}.
@@ -70,10 +63,6 @@ handle_call({update_position, Position0}, _From, State = #state{paper = Paper0})
     Paper1 = update_position_in_paper(Paper0, Position0),
     Paper = refresh_equity(Paper1#{updated_at => iso_now()}),
     {reply, paper_snapshot(Paper), State#state{paper = Paper}};
-handle_call({set_exchange_token, ExchangeID, TokenConfig}, _From, State) ->
-    {reply, arbiguard_live_account:set_exchange_token(ExchangeID, TokenConfig), State};
-handle_call({get_exchange_token, ExchangeID}, _From, State) ->
-    {reply, arbiguard_live_account:get_exchange_token(ExchangeID), State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 

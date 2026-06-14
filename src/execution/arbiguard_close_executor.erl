@@ -216,7 +216,7 @@ submit_live_child_order(Req, Order, AwaitingStatus) ->
                         owner_pid => self(),
                         target_notional => Remaining,
                         requested_notional => Remaining},
-    LiveResult = catch arbiguard_live_account:submit_order(Req, ChildOrder),
+    LiveResult = catch arbiguard_account_manager:submit_live_order(Req, ChildOrder),
     case live_submit_accepted(LiveResult) of
         true ->
             Pending0 = maps:get(pending_submissions, Order, #{}),

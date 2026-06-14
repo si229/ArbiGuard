@@ -22,13 +22,18 @@ arbiguard_sup
     arbiguard_config
     arbiguard_processes
   account/
+    arbiguard_account_manager
+    arbiguard_exchange_account
     arbiguard_state
   execution/
     arbiguard_executor
+    arbiguard_open_executor
+    arbiguard_close_executor
   exchange/
     arbiguard_market
     arbiguard_exchange_ticker
     arbiguard_exchange_funding
+    arbiguard_private_ws
   strategy/
     arbiguard_calc
     arbiguard_scanner
@@ -44,11 +49,20 @@ Actual supervised workers:
 ```text
 arbiguard_sup
   arbiguard_state
-  arbiguard_executor
+  arbiguard_open_executor
+  arbiguard_close_executor
+  arbiguard_account_manager
   arbiguard_exchange_ticker per exchange
   arbiguard_exchange_funding per exchange
+  arbiguard_symbol_watcher
   arbiguard_scanner
   arbiguard_http
+
+account_manager dynamic workers
+  arbiguard_open_executor per live account
+  arbiguard_close_executor per live account
+  arbiguard_exchange_account per account/exchange
+  arbiguard_private_ws per account/exchange
 ```
 
 `arbiguard_ets` is not a process. It is a plain helper module. `arbiguard_sup`
@@ -66,9 +80,27 @@ arbiguard_opportunity_ets
 exchange_funding -> ETS funding/ticker baseline
 exchange_ticker  -> ETS live ticker
 scanner          -> reads ETS and finds opportunities
-executor         -> creates execution order and subscribes ticker legs
-state            -> maintains simulated account and positions
+executor         -> routes to account-bound open/close executors
+account_manager  -> owns total account registry and executor binding
+exchange_account -> owns per account/exchange token, balance, positions, order callbacks
+private_ws       -> account-bound private WS callbacks, started by account_manager
+state            -> maintains default simulated account and positions
 http             -> management UI and JSON APIs
+```
+
+Default accounts:
+
+```text
+paper-main
+  mode = paper
+  open_executor  = arbiguard_open_executor
+  close_executor = arbiguard_close_executor
+
+live-main
+  mode = live
+  open_executor  = arbiguard_open_executor_live_main
+  close_executor = arbiguard_close_executor_live_main
+  exchange_accounts are created when an account config or token specifies exchanges
 ```
 
 ## Run
@@ -98,8 +130,14 @@ GET  /
 GET  /api/health
 GET  /api/config
 GET  /api/processes
+GET  /api/accounts
+POST /api/accounts
 GET  /api/executor/state
 GET  /api/funding/state
+GET  /api/live/state
+POST /api/live/token
+POST /api/live/enabled
+POST /api/live/test-order
 POST /api/funding/scan
 POST /api/funding/paper/reset
 ```
@@ -131,3 +169,4 @@ Important config keys:
 ## Documentation
 
 - [Architecture and API](docs/architecture.md)
+- [Trading rules](docs/trading_rules.md)

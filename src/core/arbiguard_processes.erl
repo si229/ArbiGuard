@@ -10,7 +10,7 @@ snapshot() ->
       symbol_watcher => safe_call(fun arbiguard_symbol_watcher:snapshot/0),
       executor => safe_call(fun arbiguard_executor:snapshot/0),
       account => account_brief(),
-      live_account => safe_call(fun arbiguard_live_account:snapshot/0),
+      accounts => safe_call(fun arbiguard_account_manager:snapshot/0),
       exchanges => [exchange_snapshot(E) || E <- Exchanges]}.
 
 enabled_exchanges(Exchanges) ->

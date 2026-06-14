@@ -134,23 +134,21 @@ route(#{method := <<"GET">>, path := <<"/api/trades/stats">>, query_params := Qu
 route(#{method := <<"POST">>, path := <<"/api/trades/stats">>, body := Body}) ->
     json_response(200, arbiguard_trade_store:stats(safe_decode(Body)));
 route(#{method := <<"GET">>, path := <<"/api/live/state">>}) ->
-    json_response(200, arbiguard_live_account:snapshot());
+    json_response(200, live_state());
 route(#{method := <<"POST">>, path := <<"/api/debug/exchange/order">>, body := Body}) ->
-    json_response(200, arbiguard_live_account:debug_order(safe_decode(Body)));
+    json_response(200, #{ok => false, reason => <<"debug_order_removed_use_live_test_order">>, payload => safe_decode(Body)});
 route(#{method := <<"POST">>, path := <<"/api/live/test-order">>, body := Body}) ->
-    json_response(200, arbiguard_live_account:test_order(safe_decode(Body)));
+    json_response(200, arbiguard_account_manager:test_order(safe_decode(Body)));
 route(#{method := <<"POST">>, path := <<"/api/live/enabled">>, body := Body}) ->
     Payload = safe_decode(Body),
-    json_response(200, arbiguard_live_account:set_enabled(maps:get(enabled, Payload, false)));
+    AccountID = maps:get(account_id, Payload, <<"live-main">>),
+    json_response(200, arbiguard_account_manager:set_live_enabled(AccountID, maps:get(enabled, Payload, false)));
 route(#{method := <<"POST">>, path := <<"/api/live/token">>, body := Body}) ->
     Payload = safe_decode(Body),
     Exchange = maps:get(exchange, Payload, <<"">>),
     AccountID = maps:get(account_id, Payload, <<"live-main">>),
     Token = maps:remove(exchange, Payload),
-    _ = catch arbiguard_exchange_account:set_token(AccountID, Exchange, maps:remove(account_id, Token)),
-    json_response(200, #{ok => arbiguard_live_account:set_exchange_token(Exchange, maps:remove(account_id, Token)),
-                         account_id => AccountID,
-                         exchange => Exchange});
+    json_response(200, arbiguard_account_manager:set_exchange_token(AccountID, Exchange, Token));
 route(#{method := <<"POST">>, path := <<"/api/funding/paper/reset">>, body := Body}) ->
     Payload = safe_decode(Body),
     ExecutorReset = arbiguard_executor:reset(),
@@ -175,6 +173,24 @@ safe_decode(Body) ->
     try arbiguard_json:decode(Body)
     catch _:Reason -> #{decode_error => fmt(Reason)}
     end.
+
+live_state() ->
+    Accounts = arbiguard_account_manager:snapshot(),
+    List = maps:get(accounts, Accounts, []),
+    Live = case [A || A <- List, maps:get(id, A, <<"">>) =:= <<"live-main">>] of
+        [Hit | _] -> Hit;
+        [] -> #{}
+    end,
+    ExchangeAccounts = maps:get(exchange_accounts, Live, #{}),
+    #{enabled => maps:get(live_enabled, Live, false),
+      account_id => maps:get(id, Live, <<"live-main">>),
+      token_exchanges => maps:keys(ExchangeAccounts),
+      accounts => List,
+      orders => [],
+      balances => #{},
+      positions => [],
+      liquidations => [],
+      logs => []}.
 
 json_response(Code, Term) ->
     Body = arbiguard_json:encode(Term),

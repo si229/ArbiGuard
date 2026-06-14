@@ -20,13 +20,13 @@
                       data = #{}}).
 
 init() ->
-    Dir0 = application:get_env(arbiguard, mnesia_dir, "data/mnesia"),
+    ok = ensure_mnesia_loaded(),
+    Dir0 = mnesia_dir(),
     Dir = filename:absname(Dir0),
     ok = filelib:ensure_dir(filename:join(Dir, "dummy")),
-    ok = application:load(mnesia),
-    ok = application:set_env(mnesia, dir, Dir),
+    ok = maybe_set_mnesia_dir(Dir),
     ensure_schema(),
-    ok = application:ensure_started(mnesia),
+    ok = ensure_mnesia_started(),
     ensure_history_table(),
     ensure_stats_table().
 
@@ -129,6 +129,39 @@ ensure_schema() ->
                     lager:warning("mnesia schema create skipped reason=~p", [Reason]),
                     ok
             end
+    end.
+
+ensure_mnesia_loaded() ->
+    case application:load(mnesia) of
+        ok -> ok;
+        {error, {already_loaded, mnesia}} -> ok;
+        {error, Reason} -> {error, Reason}
+    end.
+
+mnesia_dir() ->
+    case application:get_env(arbiguard, mnesia_dir) of
+        {ok, Dir} ->
+            Dir;
+        undefined ->
+            case application:get_env(mnesia, dir) of
+                {ok, Dir} -> Dir;
+                undefined -> "data/mnesia"
+            end
+    end.
+
+maybe_set_mnesia_dir(Dir) ->
+    case mnesia:system_info(is_running) of
+        yes ->
+            ok;
+        _ ->
+            application:set_env(mnesia, dir, Dir)
+    end.
+
+ensure_mnesia_started() ->
+    case application:ensure_started(mnesia) of
+        ok -> ok;
+        {error, {already_started, mnesia}} -> ok;
+        {error, Reason} -> {error, Reason}
     end.
 
 ensure_history_table() ->

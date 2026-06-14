@@ -139,9 +139,7 @@ await_ws_upgrade(State, ConnPid, StreamRef, Host, Path) ->
     end.
 
 login_and_subscribe(State) ->
-    Token0 = arbiguard_exchange_account:get_token(State#state.account_id, State#state.id),
-    Token1 = case Token0 of undefined -> arbiguard_live_account:get_exchange_token(State#state.id); _ -> Token0 end,
-    case Token1 of
+    case arbiguard_exchange_account:get_token(State#state.account_id, State#state.id) of
         undefined ->
             State#state{ws_status = <<"waiting_token">>, ws_error = <<"live_token_not_configured">>};
         Token ->
@@ -196,31 +194,15 @@ dispatch_private_event(Msg, State) ->
     end.
 
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := order} = Event) ->
-    case arbiguard_exchange_account:report_order_event(AccountID, ExchangeID, Event) of
-        {error, exchange_account_not_found} -> arbiguard_live_account:report_order_event(ExchangeID, Event);
-        _ -> ok
-    end;
+    arbiguard_exchange_account:report_order_event(AccountID, ExchangeID, Event);
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := balance} = Event) ->
-    case arbiguard_exchange_account:report_balance(AccountID, ExchangeID, Event) of
-        {error, exchange_account_not_found} -> arbiguard_live_account:report_balance(ExchangeID, Event);
-        _ -> ok
-    end;
+    arbiguard_exchange_account:report_balance(AccountID, ExchangeID, Event);
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := position} = Event) ->
-    case arbiguard_exchange_account:report_position(AccountID, ExchangeID, Event) of
-        {error, exchange_account_not_found} -> arbiguard_live_account:report_position(ExchangeID, Event);
-        _ -> ok
-    end;
+    arbiguard_exchange_account:report_position(AccountID, ExchangeID, Event);
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := funding} = Event) ->
-    PositionID = maps:get(position_id, Event, <<"">>),
-    case arbiguard_exchange_account:report_funding_settlement(AccountID, ExchangeID, Event#{exchange => ExchangeID}) of
-        {error, exchange_account_not_found} -> arbiguard_live_account:report_funding_settlement(PositionID, Event#{exchange => ExchangeID});
-        _ -> ok
-    end;
+    arbiguard_exchange_account:report_funding_settlement(AccountID, ExchangeID, Event#{exchange => ExchangeID});
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := liquidation} = Event) ->
-    case arbiguard_exchange_account:report_liquidation(AccountID, ExchangeID, Event) of
-        {error, exchange_account_not_found} -> arbiguard_live_account:report_liquidation(ExchangeID, Event);
-        _ -> ok
-    end;
+    arbiguard_exchange_account:report_liquidation(AccountID, ExchangeID, Event);
 dispatch_normalized_event(_AccountID, _ExchangeID, _Event) ->
     ok.
 
