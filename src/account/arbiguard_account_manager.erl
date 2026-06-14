@@ -127,7 +127,7 @@ handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) 
     ExchangeID = maps:get(exchange, Payload),
     Token = arbiguard_exchange_account:get_token(AccountID, ExchangeID),
     Result = case {maps:get(AccountID, Accounts, undefined), Token, maps:get(confirm, Payload, <<"">>), truthy(maps:get(dry_run, Payload, false))} of
-        {undefined, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"account_not_found">>};
+        {undefined, _, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"account_not_found">>};
         {_, undefined, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"live_token_not_configured">>};
         {_, _, _, true} -> dry_run_order(Payload, Token);
         {_, _, <<"LIVE">>, _} -> arbiguard_live_adapter:test_order(Payload, Token);
@@ -572,11 +572,14 @@ dry_run_order(Payload, Token) ->
             #{ok => true,
               status => <<"dry_run_ok">>,
               reason => <<"validated_with_configured_account_token_no_exchange_request_sent">>,
+              dry_run => true,
               action => maps:get(action, Payload, <<"">>),
               symbol => maps:get(symbol, Payload, <<"">>),
               side => maps:get(side, Payload, <<"">>),
+              notional => maps:get(notional, Payload, 0),
               quantity => maps:get(quantity, Payload, 0),
               price => maps:get(price, Payload, 0),
+              leverage => maps:get(leverage, Payload, 1),
               reduce_only => maps:get(reduce_only, Payload, false)};
         false ->
             #{ok => false, status => <<"rejected">>, reason => <<"live_token_not_configured">>}
