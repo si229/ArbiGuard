@@ -30,19 +30,19 @@ get_token(AccountID, ExchangeID) ->
     end.
 
 report_order_event(AccountID, ExchangeID, Event) ->
-    safe_call(AccountID, ExchangeID, {report_order_event, Event}).
+    safe_cast(AccountID, ExchangeID, {report_order_event, Event}).
 
 report_balance(AccountID, ExchangeID, Balance) ->
-    safe_call(AccountID, ExchangeID, {report_balance, Balance}).
+    safe_cast(AccountID, ExchangeID, {report_balance, Balance}).
 
 report_position(AccountID, ExchangeID, Position) ->
-    safe_call(AccountID, ExchangeID, {report_position, Position}).
+    safe_cast(AccountID, ExchangeID, {report_position, Position}).
 
 report_liquidation(AccountID, ExchangeID, Event) ->
-    safe_call(AccountID, ExchangeID, {report_liquidation, Event}).
+    safe_cast(AccountID, ExchangeID, {report_liquidation, Event}).
 
 report_funding_settlement(AccountID, ExchangeID, Event) ->
-    safe_call(AccountID, ExchangeID, {report_funding_settlement, Event}).
+    safe_cast(AccountID, ExchangeID, {report_funding_settlement, Event}).
 
 init([AccountID0, ExchangeID0, Config]) ->
     {ok, #state{account_id = norm_account(AccountID0),
@@ -57,51 +57,47 @@ handle_call({set_token, Token}, _From, State) ->
     {reply, ok, State#state{token = Token}};
 handle_call(get_token, _From, State) ->
     {reply, State#state.token, State};
-handle_call({report_order_event, Event0}, _From, State = #state{orders = Orders, logs = Logs}) ->
+handle_call(_Req, _From, State) ->
+    {reply, ok, State}.
+
+handle_cast({report_order_event, Event0}, State = #state{orders = Orders, logs = Logs}) ->
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id},
     OrderID = maps:get(order_id, Event, maps:get(id, Event, <<"">>)),
     Orders1 = case OrderID of <<"">> -> Orders; _ -> Orders#{OrderID => Event} end,
     arbiguard_account_manager:report_order_event(State#state.account_id, State#state.exchange_id, Event),
-    {reply, #{ok => true, event => Event},
-     State#state{orders = Orders1, logs = add_log(<<"order_event">>, Event, Logs)}};
-handle_call({report_balance, Balance0}, _From, State = #state{balances = Balances, logs = Logs}) ->
+    {noreply, State#state{orders = Orders1, logs = add_log(<<"order_event">>, Event, Logs)}};
+handle_cast({report_balance, Balance0}, State = #state{balances = Balances, logs = Logs}) ->
     Balance = Balance0#{account_id => State#state.account_id, exchange => State#state.exchange_id,
                         updated_at => arbiguard_util:now_ms()},
     Asset = maps:get(asset, Balance, <<"USDT">>),
-    {reply, #{ok => true, balance => Balance},
-     State#state{balances = Balances#{Asset => Balance}, logs = add_log(<<"balance">>, Balance, Logs)}};
-handle_call({report_position, Position0}, _From, State = #state{positions = Positions, logs = Logs}) ->
+    {noreply, State#state{balances = Balances#{Asset => Balance}, logs = add_log(<<"balance">>, Balance, Logs)}};
+handle_cast({report_position, Position0}, State = #state{positions = Positions, logs = Logs}) ->
     Position = Position0#{account_id => State#state.account_id, exchange => State#state.exchange_id,
                           updated_at => arbiguard_util:now_ms()},
     Key = position_key(Position),
-    {reply, #{ok => true, position => Position},
-     State#state{positions = Positions#{Key => Position}, logs = add_log(<<"position">>, Position, Logs)}};
-handle_call({report_liquidation, Event0}, _From, State = #state{liquidations = Liquidations, logs = Logs}) ->
+    {noreply, State#state{positions = Positions#{Key => Position}, logs = add_log(<<"position">>, Position, Logs)}};
+handle_cast({report_liquidation, Event0}, State = #state{liquidations = Liquidations, logs = Logs}) ->
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id,
                     time => arbiguard_util:now_ms()},
     arbiguard_account_manager:report_order_event(State#state.account_id, State#state.exchange_id,
                                                  Event#{event_type => liquidation}),
-    {reply, #{ok => true, event => Event},
-     State#state{liquidations = lists:sublist([Event | Liquidations], 100),
-                 logs = add_log(<<"liquidation">>, Event, Logs)}};
-handle_call({report_funding_settlement, Event0}, _From, State = #state{logs = Logs}) ->
+    {noreply, State#state{liquidations = lists:sublist([Event | Liquidations], 100),
+                          logs = add_log(<<"liquidation">>, Event, Logs)}};
+handle_cast({report_funding_settlement, Event0}, State = #state{logs = Logs}) ->
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id},
     PositionID = maps:get(position_id, Event, <<"">>),
     arbiguard_account_manager:report_funding_settlement(State#state.account_id, PositionID, Event),
-    {reply, #{ok => true, event => Event}, State#state{logs = add_log(<<"funding">>, Event, Logs)}};
-handle_call(_Req, _From, State) ->
-    {reply, ok, State}.
-
+    {noreply, State#state{logs = add_log(<<"funding">>, Event, Logs)}};
 handle_cast(_Msg, State) -> {noreply, State}.
 handle_info(_Info, State) -> {noreply, State}.
 terminate(_Reason, _State) -> ok.
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
-safe_call(AccountID, ExchangeID, Msg) ->
+safe_cast(AccountID, ExchangeID, Msg) ->
     Name = name(AccountID, ExchangeID),
     case whereis(Name) of
         undefined -> {error, exchange_account_not_found};
-        _ -> gen_server:call(Name, Msg)
+        _ -> gen_server:cast(Name, Msg), ok
     end.
 
 public_state(State) ->

@@ -41,7 +41,8 @@ submit_order(Req, Opportunity) ->
     gen_server:call(?MODULE, {submit_order, Req, Opportunity}).
 
 track_position(Req, Position) ->
-    gen_server:call(?MODULE, {track_position, Req, Position}).
+    gen_server:cast(?MODULE, {track_position, Req, Position}),
+    ok.
 
 report_order_event(AccountID, ExchangeID, Event) ->
     gen_server:cast(?MODULE, {report_order_event, AccountID, ExchangeID, Event}).
@@ -162,17 +163,6 @@ handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) 
         {_, _, _} -> #{ok => false, status => <<"rejected">>, reason => <<"confirm_live_required">>}
     end,
     {reply, Result#{account_id => AccountID, exchange => ExchangeID}, State};
-handle_call({track_position, Req0, Position0}, _From, State = #state{accounts = Accounts}) ->
-    Req = normalize_req_account(Req0, Position0),
-    AccountID = maps:get(account_id, Req),
-    Position = Position0#{account_id => AccountID, account_mode => maps:get(account_mode, Req)},
-    case maps:get(AccountID, Accounts, undefined) of
-        undefined ->
-            {reply, #{ok => false, reason => <<"account_not_found">>, account_id => AccountID}, State};
-        Account ->
-            Reply = arbiguard_close_executor:track_position(maps:get(close_executor, Account), Req, Position),
-            {reply, Reply, State}
-    end;
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
@@ -202,6 +192,18 @@ handle_cast({report_funding_settlement, AccountID0, PositionID, Settlement}, Sta
     case maps:get(AccountID, Accounts, undefined) of
         undefined -> ok;
         Account -> maps:get(close_executor, Account) ! {live_funding_settlement, PositionID, Settlement}
+    end,
+    {noreply, State};
+handle_cast({track_position, Req0, Position0}, State = #state{accounts = Accounts}) ->
+    Req = normalize_req_account(Req0, Position0),
+    AccountID = maps:get(account_id, Req),
+    Position = Position0#{account_id => AccountID, account_mode => maps:get(account_mode, Req)},
+    case maps:get(AccountID, Accounts, undefined) of
+        undefined ->
+            lager:warning("account manager drop track_position account_not_found account=~s symbol=~s",
+                          [AccountID, maps:get(symbol, Position, <<"">>)]);
+        Account ->
+            gen_server:cast(maps:get(close_executor, Account), {track_position, Req, Position})
     end,
     {noreply, State};
 handle_cast(_Msg, State) ->

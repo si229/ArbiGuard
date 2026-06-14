@@ -43,19 +43,9 @@ init([Config]) ->
     {ok, #state{account_id = maps:get(account_id, Config, <<"paper-main">>),
                 account_mode = maps:get(account_mode, Config, <<"paper">>)}}.
 
-handle_call({track_position, Req0, Position0}, _From, State = #state{orders = Orders}) ->
-    Req = with_state_account(arbiguard_calc:normalize_request(Req0), State),
-    Position = Position0#{account_id => maps:get(account_id, Req),
-                          account_mode => maps:get(account_mode, Req)},
-    Order = tracking_plan(Req, Position),
-    subscribe_position_symbols(Position),
-    NewOrder = Order#{status => <<"tracking_position">>, req => Req, position => Position},
-    lager:info("close executor tracking position symbol=~s long=~s short=~s account=~s/~s",
-               [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
-                maps:get(short_exchange, Position, <<"">>), maps:get(account_mode, Order, <<"">>),
-                maps:get(account_id, Order, <<"">>)]),
-    {reply, public_order(NewOrder), State#state{orders = Orders#{maps:get(id, NewOrder) => NewOrder},
-                                                last_submit = arbiguard_util:now_ms()}};
+handle_call({track_position, Req0, Position0}, _From, State) ->
+    {PublicOrder, State1} = add_tracked_position(Req0, Position0, State),
+    {reply, PublicOrder, State1};
 handle_call(reset, _From, State = #state{orders = Orders}) ->
     _ = [unsubscribe_position_symbols(Order) || {_ID, Order} <- maps:to_list(Orders)],
     {reply, #{ok => true, cleared_close_orders => maps:size(Orders)},
@@ -69,6 +59,9 @@ handle_call(snapshot, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
+handle_cast({track_position, Req0, Position0}, State) ->
+    {_PublicOrder, State1} = add_tracked_position(Req0, Position0, State),
+    {noreply, State1};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -156,6 +149,20 @@ tracking_plan(Req0, Position) ->
       target_notional => maps:get(notional, Position, maps:get(notional_usdt, Position, 0.0)),
       mode => <<"monitor">>,
       created_at => arbiguard_util:now_ms()}.
+
+add_tracked_position(Req0, Position0, State = #state{orders = Orders}) ->
+    Req = with_state_account(arbiguard_calc:normalize_request(Req0), State),
+    Position = Position0#{account_id => maps:get(account_id, Req),
+                          account_mode => maps:get(account_mode, Req)},
+    Order = tracking_plan(Req, Position),
+    subscribe_position_symbols(Position),
+    NewOrder = Order#{status => <<"tracking_position">>, req => Req, position => Position},
+    lager:info("close executor tracking position symbol=~s long=~s short=~s account=~s/~s",
+               [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
+                maps:get(short_exchange, Position, <<"">>), maps:get(account_mode, Order, <<"">>),
+                maps:get(account_id, Order, <<"">>)]),
+    {public_order(NewOrder), State#state{orders = Orders#{maps:get(id, NewOrder) => NewOrder},
+                                         last_submit = arbiguard_util:now_ms()}}.
 
 subscribe_position_symbols(Position) ->
     Symbol = maps:get(symbol, Position, <<"">>),
