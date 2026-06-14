@@ -96,6 +96,7 @@ handle_call({set_live_enabled, AccountID0, Enabled0}, _From, State = #state{acco
             {reply, #{ok => false, reason => <<"account_not_found">>, account_id => AccountID}, State};
         Account ->
             Account1 = Account#{live_enabled => Enabled},
+            broadcast_executor_meta(Account1),
             lager:warning("account manager live enabled account=~s enabled=~p", [AccountID, Enabled]),
             {reply, #{ok => true, account_id => AccountID, enabled => Enabled},
              State#state{accounts = Accounts#{AccountID => Account1}}}
@@ -107,7 +108,10 @@ handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State 
     case ensure_account_exchange(AccountID, ExchangeID, Accounts) of
         {ok, Account, Accounts1} ->
             ok = arbiguard_exchange_account:set_token(AccountID, ExchangeID, Token),
-            Account1 = add_exchange_to_account(Account, ExchangeID),
+            Account2 = add_exchange_to_account(Account, ExchangeID),
+            Tokens = maps:get(exchange_tokens, Account2, #{}),
+            Account1 = Account2#{exchange_tokens => Tokens#{ExchangeID => Token}},
+            broadcast_executor_meta(Account1),
             {reply, #{ok => true, account_id => AccountID, exchange => ExchangeID},
              State#state{accounts = Accounts1#{AccountID => Account1}}};
         {error, Reason} ->
@@ -135,7 +139,7 @@ handle_cast({notify_opportunities, Req0, Result}, State = #state{accounts = Acco
         undefined ->
             lager:warning("account manager drop opportunities account_not_found account=~s", [AccountID]);
         Account ->
-            arbiguard_open_executor:notify_opportunities(maps:get(open_executor, Account), Req, Result)
+            arbiguard_open_executor:notify_opportunities(maps:get(open_executor, Account), with_account_meta(Req, Account), Result)
     end,
     {noreply, State};
 handle_cast({report_order_event, AccountID0, _ExchangeID, Event}, State = #state{accounts = Accounts}) ->
@@ -165,7 +169,7 @@ handle_cast({track_position, Req0, Position0}, State = #state{accounts = Account
             lager:warning("account manager drop track_position account_not_found account=~s symbol=~s",
                           [AccountID, maps:get(symbol, Position, <<"">>)]);
         Account ->
-            gen_server:cast(maps:get(close_executor, Account), {track_position, Req, Position})
+            gen_server:cast(maps:get(close_executor, Account), {track_position, with_account_meta(Req, Account), Position})
     end,
     {noreply, State};
 handle_cast(_Msg, State) ->
@@ -203,6 +207,7 @@ normalize_config(Config0) when is_map(Config0) ->
       mode => Mode,
       name => arbiguard_util:to_binary(maps:get(name, Config0, <<"">>)),
       exchanges => Exchanges,
+      exchange_tokens => normalize_exchange_tokens(maps:get(exchange_tokens, Config0, #{})),
       raw => Config0};
 normalize_config(_) ->
     normalize_config(#{}).
@@ -212,26 +217,28 @@ start_account_workers(Config) ->
     Mode = maps:get(mode, Config),
     OpenName = arbiguard_open_executor:account_name(AccountID),
     CloseName = arbiguard_close_executor:account_name(AccountID),
-    OpenLog = ensure_open_executor(OpenName, AccountID, Mode),
-    CloseLog = ensure_close_executor(CloseName, AccountID, Mode),
     {ExchangeAccounts, ExchangeLog} = start_exchange_accounts(AccountID, maps:get(exchanges, Config, [])),
+    Meta = executor_meta(Config, ExchangeAccounts),
+    OpenLog = ensure_open_executor(OpenName, AccountID, Mode, Meta),
+    CloseLog = ensure_close_executor(CloseName, AccountID, Mode, Meta),
     {Config#{open_executor => OpenName,
              close_executor => CloseName,
              exchange_accounts => ExchangeAccounts,
              live_enabled => maps:get(live_enabled, Config, false),
+             exchange_tokens => maps:get(exchange_tokens, Config, #{}),
              created_at => arbiguard_util:now_ms()},
      #{open_executor => OpenLog, close_executor => CloseLog, exchange_accounts => ExchangeLog}}.
 
-ensure_open_executor(Name, AccountID, Mode) ->
+ensure_open_executor(Name, AccountID, Mode, Meta) ->
     case whereis(Name) of
-        undefined -> arbiguard_open_executor:start_link(#{name => Name, account_id => AccountID, account_mode => Mode});
-        Pid -> {ok, Pid, already_started}
+        undefined -> arbiguard_open_executor:start_link(Meta#{name => Name, account_id => AccountID, account_mode => Mode});
+        Pid -> gen_server:cast(Pid, {account_meta, Meta}), {ok, Pid, already_started}
     end.
 
-ensure_close_executor(Name, AccountID, Mode) ->
+ensure_close_executor(Name, AccountID, Mode, Meta) ->
     case whereis(Name) of
-        undefined -> arbiguard_close_executor:start_link(#{name => Name, account_id => AccountID, account_mode => Mode});
-        Pid -> {ok, Pid, already_started}
+        undefined -> arbiguard_close_executor:start_link(Meta#{name => Name, account_id => AccountID, account_mode => Mode});
+        Pid -> gen_server:cast(Pid, {account_meta, Meta}), {ok, Pid, already_started}
     end.
 
 start_exchange_accounts(AccountID, Exchanges) ->
