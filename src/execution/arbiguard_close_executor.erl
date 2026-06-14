@@ -6,6 +6,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {account_id = <<"paper-main">>, account_mode = <<"paper">>,
+                live_enabled = false, exchange_tokens = #{}, exchange_accounts = #{},
                 orders = #{}, last_submit = 0, ticker_cache = #{}}).
 
 start_link() ->
@@ -41,7 +42,10 @@ init([]) ->
     {ok, #state{}};
 init([Config]) ->
     {ok, #state{account_id = maps:get(account_id, Config, <<"paper-main">>),
-                account_mode = maps:get(account_mode, Config, <<"paper">>)}}.
+                account_mode = maps:get(account_mode, Config, <<"paper">>),
+                live_enabled = maps:get(live_enabled, Config, false),
+                exchange_tokens = maps:get(exchange_tokens, Config, #{}),
+                exchange_accounts = maps:get(exchange_accounts, Config, #{})}}.
 
 handle_call({track_position, Req0, Position0}, _From, State) ->
     {PublicOrder, State1} = add_tracked_position(Req0, Position0, State),
@@ -53,6 +57,9 @@ handle_call(reset, _From, State = #state{orders = Orders}) ->
 handle_call(snapshot, _From, State) ->
     {reply, #{account_id => State#state.account_id,
               account_mode => State#state.account_mode,
+              live_enabled => State#state.live_enabled,
+              exchange_count => maps:size(State#state.exchange_accounts),
+              token_configured_exchanges => maps:keys(State#state.exchange_tokens),
               orders => [public_order(O) || O <- maps:values(State#state.orders)],
               last_submit => State#state.last_submit,
               ticker_cache_size => maps:size(State#state.ticker_cache)}, State};
@@ -62,6 +69,8 @@ handle_call(_Req, _From, State) ->
 handle_cast({track_position, Req0, Position0}, State) ->
     {_PublicOrder, State1} = add_tracked_position(Req0, Position0, State),
     {noreply, State1};
+handle_cast({account_meta, Meta}, State) ->
+    {noreply, apply_account_meta(Meta, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -843,7 +852,17 @@ safe_div(A, B) -> A / B.
 
 with_state_account(Req, State) ->
     Req#{account_id => maps:get(account_id, Req, State#state.account_id),
-         account_mode => maps:get(account_mode, Req, State#state.account_mode)}.
+         account_mode => maps:get(account_mode, Req, State#state.account_mode),
+         live_enabled => maps:get(live_enabled, Req, State#state.live_enabled),
+         exchange_tokens => maps:get(exchange_tokens, Req, State#state.exchange_tokens),
+         exchange_accounts => maps:get(exchange_accounts, Req, State#state.exchange_accounts)}.
+
+apply_account_meta(Meta, State) ->
+    State#state{account_id = maps:get(account_id, Meta, State#state.account_id),
+                account_mode = maps:get(account_mode, Meta, State#state.account_mode),
+                live_enabled = maps:get(live_enabled, Meta, State#state.live_enabled),
+                exchange_tokens = maps:get(exchange_tokens, Meta, State#state.exchange_tokens),
+                exchange_accounts = maps:get(exchange_accounts, Meta, State#state.exchange_accounts)}.
 
 safe_atom_part(V) ->
     S = binary_to_list(string:lowercase(arbiguard_util:to_binary(V))),

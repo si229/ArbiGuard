@@ -10,6 +10,7 @@
 -record(state, {account_id = <<"paper-main">>, account_mode = <<"paper">>,
                 live_enabled = false, exchange_tokens = #{}, exchange_accounts = #{},
                 orders = #{}, last_opportunities = [], last_notify = 0,
+                last_opportunity_updated_at = 0,
                 ticker_cache = #{}, last_rejects = []}).
 
 start_link() ->
@@ -48,8 +49,10 @@ snapshot(Executor) ->
     gen_server:call(Executor, snapshot).
 
 init([]) ->
+    schedule_opportunity_poll(),
     {ok, #state{}};
 init([Config]) ->
+    schedule_opportunity_poll(),
     {ok, #state{account_id = maps:get(account_id, Config, <<"paper-main">>),
                 account_mode = maps:get(account_mode, Config, <<"paper">>),
                 live_enabled = maps:get(live_enabled, Config, false),
@@ -73,24 +76,30 @@ handle_call(snapshot, _From, State) ->
               last_opportunities => State#state.last_opportunities,
               open_rejects => State#state.last_rejects,
               last_notify => State#state.last_notify,
+              last_opportunity_updated_at => State#state.last_opportunity_updated_at,
               ticker_cache_size => maps:size(State#state.ticker_cache)}, State};
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 handle_cast({opportunities, Req, Result}, State) ->
-    Opportunities = maps:get(opportunities, Result, []),
-    Req1 = with_state_account(arbiguard_calc:normalize_request(Req), State),
-    CurrentIDs = opportunity_id_set(Req1, Opportunities),
-    PrunedState = prune_stale_waiting_orders(CurrentIDs, State),
-    NewState = lists:foldl(fun(Op, Acc) -> maybe_create_execution_order(Req1, Op, Acc) end, PrunedState, Opportunities),
-    {noreply, NewState#state{last_opportunities = Opportunities,
-                              last_rejects = trim_rejects(NewState#state.last_rejects),
-                              last_notify = arbiguard_util:now_ms()}};
+    {noreply, process_opportunities(Req, maps:get(opportunities, Result, []), 0, State)};
 handle_cast({account_meta, Meta}, State) ->
     {noreply, apply_account_meta(Meta, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+handle_info(opportunity_poll, State) ->
+    schedule_opportunity_poll(),
+    Snapshot = arbiguard_ets:opportunity_snapshot(),
+    UpdatedAt = arbiguard_util:to_int(maps:get(updated_at, Snapshot, 0), 0),
+    case UpdatedAt > State#state.last_opportunity_updated_at of
+        true ->
+            Req = maps:get(req, Snapshot, #{}),
+            Ops = maps:get(opportunities, Snapshot, []),
+            {noreply, process_opportunities(Req, Ops, UpdatedAt, State)};
+        false ->
+            {noreply, State}
+    end;
 handle_info({ticker_update, Row}, State = #state{ticker_cache = Cache}) ->
     Symbol = maps:get(symbol, Row, <<"">>),
     State1 = State#state{ticker_cache = update_symbol_cache(Row, Cache)},
@@ -116,6 +125,22 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+schedule_opportunity_poll() ->
+    Interval = arbiguard_util:to_int(application:get_env(arbiguard, opportunity_poll_ms, 1000), 1000),
+    erlang:send_after(max(100, Interval), self(), opportunity_poll),
+    ok.
+
+process_opportunities(Req0, Opportunities, UpdatedAt, State) ->
+    Req = with_state_account(arbiguard_calc:normalize_request(Req0), State),
+    CurrentIDs = opportunity_id_set(Req, Opportunities),
+    PrunedState = prune_stale_waiting_orders(CurrentIDs, State),
+    NewState = lists:foldl(fun(Op, Acc) -> maybe_create_execution_order(Req, Op, Acc) end,
+                           PrunedState, Opportunities),
+    NewState#state{last_opportunities = Opportunities,
+                   last_rejects = trim_rejects(NewState#state.last_rejects),
+                   last_notify = arbiguard_util:now_ms(),
+                   last_opportunity_updated_at = max(UpdatedAt, NewState#state.last_opportunity_updated_at)}.
 
 maybe_create_execution_order(Req, Op, State = #state{orders = Orders}) ->
     Req1 = arbiguard_calc:normalize_request(Req),

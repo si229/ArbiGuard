@@ -3,13 +3,14 @@
 -export([init/0]).
 -export([put_ticker/1, delete_ticker/2, get_ticker/2, all_tickers/0,
          put_funding/1, get_funding/2, all_funding/0,
-         put_opportunities/1, all_opportunities/0,
+         put_opportunities/1, put_opportunities/2, opportunity_snapshot/0, all_opportunities/0,
          put_order_owner/3, find_order_owner/3,
          put_position_owner/4, find_position_owner/3]).
 
 -define(TICKER, arbiguard_ticker_ets).
 -define(FUNDING, arbiguard_funding_ets).
 -define(OPPORTUNITY, arbiguard_opportunity_ets).
+-define(OPPORTUNITY_META_KEY, '__meta__').
 -define(ORDER_OWNER, arbiguard_order_owner_ets).
 -define(POSITION_OWNER, arbiguard_position_owner_ets).
 
@@ -48,12 +49,25 @@ all_funding() ->
     [Row || {_Key, Row} <- ets:tab2list(?FUNDING)].
 
 put_opportunities(Ops) ->
+    put_opportunities(#{}, Ops).
+
+put_opportunities(Req, Ops) ->
     ets:delete_all_objects(?OPPORTUNITY),
     [ets:insert(?OPPORTUNITY, {opportunity_key(Op), Op}) || Op <- Ops],
+    ets:insert(?OPPORTUNITY, {?OPPORTUNITY_META_KEY, #{req => Req,
+                                                       count => length(Ops),
+                                                       updated_at => arbiguard_util:now_ms()}}),
     ok.
 
 all_opportunities() ->
-    [Row || {_Key, Row} <- ets:tab2list(?OPPORTUNITY)].
+    [Row || {Key, Row} <- ets:tab2list(?OPPORTUNITY), Key =/= ?OPPORTUNITY_META_KEY].
+
+opportunity_snapshot() ->
+    Meta = case ets:lookup(?OPPORTUNITY, ?OPPORTUNITY_META_KEY) of
+        [{?OPPORTUNITY_META_KEY, M}] -> M;
+        [] -> #{req => #{}, count => 0, updated_at => 0}
+    end,
+    Meta#{opportunities => all_opportunities()}.
 
 put_order_owner(AccountID, ExchangeID, Order) ->
     Owner = maps:get(owner_pid, Order, undefined),

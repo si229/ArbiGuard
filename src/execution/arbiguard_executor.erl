@@ -3,10 +3,8 @@
 -export([notify_opportunities/2, submit_order/2, reset/0, snapshot/0]).
 
 notify_opportunities(Req, Result) ->
-    case catch arbiguard_account_manager:notify_opportunities(Req, Result) of
-        {'EXIT', _} -> arbiguard_open_executor:notify_opportunities(Req, Result);
-        Other -> Other
-    end.
+    arbiguard_ets:put_opportunities(arbiguard_calc:normalize_request(Req),
+                                    maps:get(opportunities, Result, [])).
 
 submit_order(Req, Opportunity) ->
     Req1 = normalize_req_account(Req),

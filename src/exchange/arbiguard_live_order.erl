@@ -29,7 +29,7 @@ submit_with_action(Action0, Req0, Order0) ->
         false ->
             rejected(Order, <<"live_account_disabled">>);
         true ->
-            case required_tokens(AccountID, Order) of
+            case required_tokens(Req, AccountID, Order) of
                 {ok, Exchanges} ->
                     accept_pending_adapter(Order, Exchanges);
                 {error, Reason, ExchangeID} ->
@@ -51,21 +51,28 @@ rejected(Order, Reason) ->
                         reason => Reason,
                         submitted_at => maps:get(submitted_at, Order, arbiguard_util:now_ms())}).
 
-required_tokens(AccountID, Order) ->
+required_tokens(Req, AccountID, Order) ->
     Exchanges = required_exchanges(Order),
-    required_tokens(AccountID, Exchanges, []).
+    required_tokens(Req, AccountID, Exchanges, []).
 
-required_tokens(_AccountID, [], Acc) ->
+required_tokens(_Req, _AccountID, [], Acc) ->
     {ok, lists:reverse(Acc)};
-required_tokens(AccountID, [ExchangeID | Rest], Acc) ->
-    case arbiguard_exchange_account:get_token(AccountID, ExchangeID) of
+required_tokens(Req, AccountID, [ExchangeID | Rest], Acc) ->
+    case token_for_exchange(Req, AccountID, ExchangeID) of
         undefined -> {error, <<"live_token_not_configured">>, ExchangeID};
         Token when is_map(Token) ->
             case has_token(Token) of
-                true -> required_tokens(AccountID, Rest, [ExchangeID | Acc]);
+                true -> required_tokens(Req, AccountID, Rest, [ExchangeID | Acc]);
                 false -> {error, <<"live_token_not_configured">>, ExchangeID}
             end;
         _ -> {error, <<"live_token_not_configured">>, ExchangeID}
+    end.
+
+token_for_exchange(Req, AccountID, ExchangeID) ->
+    Tokens = maps:get(exchange_tokens, Req, #{}),
+    case maps:get(ExchangeID, Tokens, undefined) of
+        undefined -> arbiguard_exchange_account:get_token(AccountID, ExchangeID);
+        Token -> Token
     end.
 
 required_exchanges(Order) ->

@@ -25,7 +25,7 @@ init([]) ->
 
 handle_call({scan_once, Req}, _From, State) ->
     Result = run_scan(Req),
-    arbiguard_executor:notify_opportunities(Req, Result),
+    persist_scan_result(Req, Result),
     {reply, Result, State#state{req = Req, last_result = Result, last_scan = arbiguard_util:now_ms()}};
 handle_call({apply_settings, Req0}, _From, State) ->
     Req = arbiguard_calc:normalize_request(Req0),
@@ -47,7 +47,7 @@ handle_cast(_Msg, State) ->
 
 handle_info(scan_tick, State = #state{req = Req, interval_ms = Interval}) ->
     Result = scan_from_ets(Req),
-    arbiguard_executor:notify_opportunities(Req, Result),
+    persist_scan_result(Req, Result),
     erlang:send_after(Interval, self(), scan_tick),
     {noreply, State#state{last_result = Result, last_scan = arbiguard_util:now_ms()}};
 handle_info(_Info, State) ->
@@ -93,6 +93,12 @@ run_scan(Req) ->
         true -> scan(Req);
         false -> scan_from_ets(Req)
     end.
+
+persist_scan_result(Req0, Result) ->
+    Req = arbiguard_calc:normalize_request(Req0),
+    Ops = maps:get(opportunities, Result, []),
+    ok = arbiguard_ets:put_opportunities(Req, Ops),
+    ok.
 
 merge_ets_market(Enabled) ->
     FundingRows = arbiguard_ets:all_funding(),

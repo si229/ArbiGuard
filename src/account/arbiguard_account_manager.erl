@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0, snapshot/0, create_account/1, account/1,
-         open_executor/1, close_executor/1, notify_opportunities/2,
+         open_executor/1, close_executor/1,
          track_position/2, report_order_event/3,
          report_funding_settlement/3, set_live_enabled/2, set_exchange_token/3,
          get_exchange_token/2, test_order/1]).
@@ -33,9 +33,6 @@ close_executor(AccountID) ->
         {ok, Account} -> {ok, maps:get(close_executor, Account)};
         Error -> Error
     end.
-
-notify_opportunities(Req, Result) ->
-    gen_server:cast(?MODULE, {notify_opportunities, Req, Result}).
 
 track_position(Req, Position) ->
     gen_server:cast(?MODULE, {track_position, Req, Position}),
@@ -132,16 +129,6 @@ handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) 
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({notify_opportunities, Req0, Result}, State = #state{accounts = Accounts}) ->
-    Req = normalize_req_account(Req0),
-    AccountID = maps:get(account_id, Req),
-    case maps:get(AccountID, Accounts, undefined) of
-        undefined ->
-            lager:warning("account manager drop opportunities account_not_found account=~s", [AccountID]);
-        Account ->
-            arbiguard_open_executor:notify_opportunities(maps:get(open_executor, Account), with_account_meta(Req, Account), Result)
-    end,
-    {noreply, State};
 handle_cast({report_order_event, AccountID0, _ExchangeID, Event}, State = #state{accounts = Accounts}) ->
     AccountID = norm_account_id(AccountID0),
     case maps:get(AccountID, Accounts, undefined) of
@@ -322,9 +309,6 @@ cast_executor_meta(Name, Meta) when is_atom(Name) ->
 cast_executor_meta(_Name, _Meta) ->
     ok.
 
-normalize_req_account(Req) ->
-    normalize_req_account(Req, #{}).
-
 normalize_req_account(Req0, Position) ->
     Req = arbiguard_calc:normalize_request(Req0),
     Mode = norm_mode(maps:get(account_mode, Req, maps:get(account_mode, Position, <<"paper">>))),
@@ -385,7 +369,10 @@ normalize_exchange_token(Token0) ->
 map_get_any(Key, Map, Default) when is_atom(Key), is_map(Map) ->
     maps:get(Key, Map, maps:get(atom_to_binary(Key, utf8), Map, Default));
 map_get_any(Key, Map, Default) when is_binary(Key), is_map(Map) ->
-    maps:get(Key, Map, maps:get(binary_to_existing_atom(Key, utf8), Map, Default));
+    AtomValue = try maps:get(binary_to_existing_atom(Key, utf8), Map, Default)
+                catch _:_ -> Default
+                end,
+    maps:get(Key, Map, AtomValue);
 map_get_any(_Key, _Map, Default) ->
     Default.
 
