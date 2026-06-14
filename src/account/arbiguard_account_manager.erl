@@ -3,7 +3,7 @@
 
 -export([start_link/0, snapshot/0, create_account/1, account/1,
          open_executor/1, close_executor/1, notify_opportunities/2,
-         submit_order/2, track_position/2, report_order_event/3,
+         track_position/2, report_order_event/3,
          report_funding_settlement/3, set_live_enabled/2, set_exchange_token/3,
          get_exchange_token/2, submit_live_order/2, test_order/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -36,9 +36,6 @@ close_executor(AccountID) ->
 
 notify_opportunities(Req, Result) ->
     gen_server:cast(?MODULE, {notify_opportunities, Req, Result}).
-
-submit_order(Req, Opportunity) ->
-    gen_server:call(?MODULE, {submit_order, Req, Opportunity}).
 
 track_position(Req, Position) ->
     gen_server:cast(?MODULE, {track_position, Req, Position}),
@@ -118,16 +115,6 @@ handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State 
              State#state{accounts = Accounts1#{AccountID => Account1}}};
         {error, Reason} ->
             {reply, #{ok => false, reason => Reason, account_id => AccountID, exchange => ExchangeID}, State}
-    end;
-handle_call({submit_order, Req0, Opportunity}, _From, State = #state{accounts = Accounts}) ->
-    Req = normalize_req_account(Req0),
-    AccountID = maps:get(account_id, Req),
-    case maps:get(AccountID, Accounts, undefined) of
-        undefined ->
-            {reply, #{ok => false, reason => <<"account_not_found">>, account_id => AccountID}, State};
-        Account ->
-            Reply = arbiguard_open_executor:submit_order(maps:get(open_executor, Account), Req, Opportunity),
-            {reply, Reply, State}
     end;
 handle_call({submit_live_order, Req0, Order0}, _From, State = #state{accounts = Accounts}) ->
     Req = normalize_req_account(Req0, Order0),

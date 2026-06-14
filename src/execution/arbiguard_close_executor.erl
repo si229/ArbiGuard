@@ -156,6 +156,7 @@ add_tracked_position(Req0, Position0, State = #state{orders = Orders}) ->
                           account_mode => maps:get(account_mode, Req)},
     Order = tracking_plan(Req, Position),
     subscribe_position_symbols(Position),
+    register_position_owner(Req, Position),
     NewOrder = Order#{status => <<"tracking_position">>, req => Req, position => Position},
     lager:info("close executor tracking position symbol=~s long=~s short=~s account=~s/~s",
                [maps:get(symbol, Position, <<"">>), maps:get(long_exchange, Position, <<"">>),
@@ -170,6 +171,22 @@ subscribe_position_symbols(Position) ->
     ShortEx = maps:get(short_exchange, Position, <<"">>),
     catch arbiguard_exchange_ticker:subscribe(LongEx, Symbol, close_execution_order),
     catch arbiguard_exchange_ticker:subscribe(ShortEx, Symbol, close_execution_order),
+    ok.
+
+register_position_owner(Req, Position) ->
+    AccountID = maps:get(account_id, Req, maps:get(account_id, Position, <<"live-main">>)),
+    LongEx = maps:get(long_exchange, Position, <<"">>),
+    ShortEx = maps:get(short_exchange, Position, <<"">>),
+    LongPosition = Position#{side => <<"long">>, position_side => <<"long">>},
+    ShortPosition = Position#{side => <<"short">>, position_side => <<"short">>},
+    case LongEx =/= <<"">> of
+        true -> arbiguard_ets:put_position_owner(AccountID, LongEx, LongPosition, self());
+        false -> ok
+    end,
+    case ShortEx =/= <<"">> of
+        true -> arbiguard_ets:put_position_owner(AccountID, ShortEx, ShortPosition, self());
+        false -> ok
+    end,
     ok.
 
 unsubscribe_position_symbols(Order) ->
@@ -223,6 +240,7 @@ submit_live_child_order(Req, Order, AwaitingStatus) ->
                         owner_pid => self(),
                         target_notional => Remaining,
                         requested_notional => Remaining},
+    register_live_order_owner(Req, ChildOrder),
     LiveResult = catch arbiguard_account_manager:submit_live_order(Req, ChildOrder),
     case live_submit_accepted(LiveResult) of
         true ->
@@ -249,6 +267,20 @@ submit_error(Result) when is_map(Result) ->
     maps:get(reason, Result, <<"submit_failed">>);
 submit_error(_Result) ->
     <<"submit_exception">>.
+
+register_live_order_owner(Req, Order) ->
+    AccountID = maps:get(account_id, Req, maps:get(account_id, Order, <<"live-main">>)),
+    LongEx = maps:get(long_exchange, Order, <<"">>),
+    ShortEx = maps:get(short_exchange, Order, <<"">>),
+    case LongEx =/= <<"">> of
+        true -> arbiguard_ets:put_order_owner(AccountID, LongEx, Order);
+        false -> ok
+    end,
+    case ShortEx =/= <<"">> of
+        true -> arbiguard_ets:put_order_owner(AccountID, ShortEx, Order);
+        false -> ok
+    end,
+    ok.
 
 maybe_dispatch_symbol_orders(Symbol, State = #state{orders = Orders, ticker_cache = Cache}) ->
     NewOrders = maps:map(fun(_ID, Order) ->

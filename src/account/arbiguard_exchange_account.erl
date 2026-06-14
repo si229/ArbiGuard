@@ -64,7 +64,6 @@ handle_cast({report_order_event, Event0}, State = #state{orders = Orders, logs =
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id},
     OrderID = maps:get(order_id, Event, maps:get(id, Event, <<"">>)),
     Orders1 = case OrderID of <<"">> -> Orders; _ -> Orders#{OrderID => Event} end,
-    arbiguard_account_manager:report_order_event(State#state.account_id, State#state.exchange_id, Event),
     {noreply, State#state{orders = Orders1, logs = add_log(<<"order_event">>, Event, Logs)}};
 handle_cast({report_balance, Balance0}, State = #state{balances = Balances, logs = Logs}) ->
     Balance = Balance0#{account_id => State#state.account_id, exchange => State#state.exchange_id,
@@ -79,14 +78,10 @@ handle_cast({report_position, Position0}, State = #state{positions = Positions, 
 handle_cast({report_liquidation, Event0}, State = #state{liquidations = Liquidations, logs = Logs}) ->
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id,
                     time => arbiguard_util:now_ms()},
-    arbiguard_account_manager:report_order_event(State#state.account_id, State#state.exchange_id,
-                                                 Event#{event_type => liquidation}),
     {noreply, State#state{liquidations = lists:sublist([Event | Liquidations], 100),
                           logs = add_log(<<"liquidation">>, Event, Logs)}};
 handle_cast({report_funding_settlement, Event0}, State = #state{logs = Logs}) ->
     Event = Event0#{account_id => State#state.account_id, exchange => State#state.exchange_id},
-    PositionID = maps:get(position_id, Event, <<"">>),
-    arbiguard_account_manager:report_funding_settlement(State#state.account_id, PositionID, Event),
     {noreply, State#state{logs = add_log(<<"funding">>, Event, Logs)}};
 handle_cast(_Msg, State) -> {noreply, State}.
 handle_info(_Info, State) -> {noreply, State}.

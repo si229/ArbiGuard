@@ -194,17 +194,53 @@ dispatch_private_event(Msg, State) ->
     end.
 
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := order} = Event) ->
+    route_order_event(AccountID, ExchangeID, Event),
     arbiguard_exchange_account:report_order_event(AccountID, ExchangeID, Event);
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := balance} = Event) ->
     arbiguard_exchange_account:report_balance(AccountID, ExchangeID, Event);
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := position} = Event) ->
     arbiguard_exchange_account:report_position(AccountID, ExchangeID, Event);
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := funding} = Event) ->
+    route_position_event(AccountID, ExchangeID, {live_funding_settlement, maps:get(position_id, Event, <<"">>), Event}),
     arbiguard_exchange_account:report_funding_settlement(AccountID, ExchangeID, Event#{exchange => ExchangeID});
 dispatch_normalized_event(AccountID, ExchangeID, #{event_type := liquidation} = Event) ->
+    route_position_event(AccountID, ExchangeID, {live_order_update, Event#{event_type => liquidation}}),
     arbiguard_exchange_account:report_liquidation(AccountID, ExchangeID, Event);
 dispatch_normalized_event(_AccountID, _ExchangeID, _Event) ->
     ok.
+
+route_order_event(AccountID, ExchangeID, Event) ->
+    case arbiguard_ets:find_order_owner(AccountID, ExchangeID, Event) of
+        {ok, OwnerPid, _Row} ->
+            OwnerPid ! {live_order_update, Event},
+            lager:info("private ws routed order event account=~s exchange=~s order=~s owner=~p status=~s",
+                       [AccountID, ExchangeID, maps:get(order_id, Event, <<"">>), OwnerPid, maps:get(status, Event, <<"">>)]);
+        not_found ->
+            lager:warning("private ws order owner not found account=~s exchange=~s order=~s client=~s symbol=~s",
+                          [AccountID, ExchangeID, maps:get(order_id, Event, <<"">>),
+                           maps:get(client_order_id, Event, <<"">>), maps:get(symbol, Event, <<"">>)])
+    end.
+
+route_position_event(AccountID, ExchangeID, Msg) ->
+    Event = position_event_from_msg(Msg),
+    case arbiguard_ets:find_position_owner(AccountID, ExchangeID, Event) of
+        {ok, OwnerPid, _Row} ->
+            OwnerPid ! Msg,
+            lager:info("private ws routed position event account=~s exchange=~s symbol=~s position=~s owner=~p",
+                       [AccountID, ExchangeID, maps:get(symbol, Event, <<"">>),
+                        maps:get(position_id, Event, maps:get(id, Event, <<"">>)), OwnerPid]);
+        not_found ->
+            lager:warning("private ws position owner not found account=~s exchange=~s symbol=~s position=~s",
+                          [AccountID, ExchangeID, maps:get(symbol, Event, <<"">>),
+                           maps:get(position_id, Event, maps:get(id, Event, <<"">>))])
+    end.
+
+position_event_from_msg({live_funding_settlement, PositionID, Event}) ->
+    Event#{position_id => PositionID};
+position_event_from_msg({live_order_update, Event}) ->
+    Event;
+position_event_from_msg(Event) ->
+    Event.
 
 normalize_private_events(ID, Msg) ->
     Rows0 = rows_from_private_msg(Msg),

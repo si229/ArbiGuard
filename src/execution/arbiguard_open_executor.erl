@@ -327,6 +327,7 @@ submit_live_child_order(Req, Order, AwaitingStatus) ->
                         owner_pid => self(),
                         target_notional => BatchNotional,
                         requested_notional => BatchNotional},
+    register_live_order_owner(Req, ChildOrder),
     LiveResult = catch arbiguard_account_manager:submit_live_order(Req, ChildOrder),
     case live_submit_accepted(LiveResult) of
         true ->
@@ -353,6 +354,20 @@ submit_error(Result) when is_map(Result) ->
     maps:get(reason, Result, <<"submit_failed">>);
 submit_error(_Result) ->
     <<"submit_exception">>.
+
+register_live_order_owner(Req, Order) ->
+    AccountID = maps:get(account_id, Req, maps:get(account_id, Order, <<"live-main">>)),
+    LongEx = maps:get(long_exchange, Order, <<"">>),
+    ShortEx = maps:get(short_exchange, Order, <<"">>),
+    case LongEx =/= <<"">> of
+        true -> arbiguard_ets:put_order_owner(AccountID, LongEx, Order);
+        false -> ok
+    end,
+    case ShortEx =/= <<"">> of
+        true -> arbiguard_ets:put_order_owner(AccountID, ShortEx, Order);
+        false -> ok
+    end,
+    ok.
 
 maybe_dispatch_ready_orders(State = #state{orders = Orders, ticker_cache = Cache}) ->
     NewOrders = maps:map(fun(_ID, Order) -> maybe_dispatch_order(Order, Cache) end, Orders),
