@@ -187,16 +187,35 @@ live_state() ->
     end,
     ExchangeAccounts = maps:get(exchange_accounts, Live, #{}),
     TokenConfigured = maps:get(token_configured_exchanges, Live, []),
+    ExchangeStates = live_exchange_states(maps:get(id, Live, <<"live-main">>), maps:keys(ExchangeAccounts)),
     #{enabled => maps:get(live_enabled, Live, false),
       account_id => maps:get(id, Live, <<"live-main">>),
       exchange_accounts => maps:keys(ExchangeAccounts),
       token_configured_exchanges => TokenConfigured,
+      exchange_states => ExchangeStates,
       accounts => List,
-      orders => [],
-      balances => #{},
-      positions => [],
-      liquidations => [],
-      logs => []}.
+      orders => lists:append([maps:get(orders, S, []) || S <- ExchangeStates]),
+      balances => live_balances_by_exchange(ExchangeStates),
+      positions => lists:append([maps:get(positions, S, []) || S <- ExchangeStates]),
+      liquidations => lists:append([maps:get(liquidations, S, []) || S <- ExchangeStates]),
+      logs => lists:append([maps:get(logs, S, []) || S <- ExchangeStates])}.
+
+live_exchange_states(AccountID, Exchanges) ->
+    [live_exchange_state(AccountID, ExchangeID) || ExchangeID <- Exchanges].
+
+live_exchange_state(AccountID, ExchangeID) ->
+    case catch arbiguard_exchange_account:snapshot(AccountID, ExchangeID) of
+        Snapshot when is_map(Snapshot) -> Snapshot;
+        {'EXIT', Reason} -> #{account_id => AccountID, exchange => ExchangeID,
+                              error => fmt(Reason), balances => #{},
+                              positions => [], orders => [], liquidations => [], logs => []};
+        Other -> #{account_id => AccountID, exchange => ExchangeID,
+                   error => fmt(Other), balances => #{},
+                   positions => [], orders => [], liquidations => [], logs => []}
+    end.
+
+live_balances_by_exchange(ExchangeStates) ->
+    maps:from_list([{maps:get(exchange, S, <<"">>), maps:get(balances, S, #{})} || S <- ExchangeStates]).
 
 json_response(Code, Term) ->
     Body = arbiguard_json:encode(Term),

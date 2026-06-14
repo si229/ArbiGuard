@@ -5,7 +5,7 @@
          open_executor/1, close_executor/1,
          track_position/2, report_order_event/3,
          report_funding_settlement/3, set_live_enabled/2, set_exchange_token/3,
-         get_exchange_token/2, test_order/1]).
+         get_exchange_token/2, exchange_snapshot_synced/3, sync_account/1, test_order/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {accounts = #{}}).
@@ -56,6 +56,12 @@ get_exchange_token(AccountID, ExchangeID) ->
         _ -> undefined
     end.
 
+exchange_snapshot_synced(AccountID, ExchangeID, Snapshot) ->
+    gen_server:cast(?MODULE, {exchange_snapshot_synced, AccountID, ExchangeID, Snapshot}).
+
+sync_account(AccountID) ->
+    gen_server:cast(?MODULE, {sync_account, AccountID}).
+
 test_order(Payload) ->
     gen_server:call(?MODULE, {test_order, Payload}, 30000).
 
@@ -105,6 +111,7 @@ handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State 
     case ensure_account_exchange(AccountID, ExchangeID, Accounts) of
         {ok, Account, Accounts1} ->
             ok = arbiguard_exchange_account:set_token(AccountID, ExchangeID, Token),
+            catch arbiguard_private_ws:refresh_auth(AccountID, ExchangeID),
             Account2 = add_exchange_to_account(Account, ExchangeID),
             Tokens = maps:get(exchange_tokens, Account2, #{}),
             Account1 = Account2#{exchange_tokens => Tokens#{ExchangeID => Token}},
@@ -138,6 +145,28 @@ handle_cast({report_order_event, AccountID0, _ExchangeID, Event}, State = #state
             Close = maps:get(close_executor, Account),
             Open ! {live_order_update, Event},
             Close ! {live_order_update, Event}
+    end,
+    {noreply, State};
+handle_cast({exchange_snapshot_synced, AccountID0, ExchangeID0, Snapshot0}, State = #state{accounts = Accounts}) ->
+    AccountID = norm_account_id(AccountID0),
+    ExchangeID = norm_exchange(ExchangeID0),
+    case maps:get(AccountID, Accounts, undefined) of
+        undefined ->
+            {noreply, State};
+        Account ->
+            Snapshots0 = maps:get(exchange_snapshots, Account, #{}),
+            Snapshot = Snapshot0#{exchange => ExchangeID, synced_at => arbiguard_util:now_ms()},
+            Account1 = Account#{exchange_snapshots => Snapshots0#{ExchangeID => Snapshot}},
+            sync_live_pairs_to_close_executor(Account1),
+            {noreply, State#state{accounts = Accounts#{AccountID => Account1}}}
+    end;
+handle_cast({sync_account, AccountID0}, State = #state{accounts = Accounts}) ->
+    AccountID = norm_account_id(AccountID0),
+    case maps:get(AccountID, Accounts, undefined) of
+        undefined -> ok;
+        Account ->
+            [catch arbiguard_exchange_account:sync_now(AccountID, ExchangeID)
+             || ExchangeID <- maps:get(exchanges, Account, [])]
     end,
     {noreply, State};
 handle_cast({report_funding_settlement, AccountID0, PositionID, Settlement}, State = #state{accounts = Accounts}) ->
@@ -319,8 +348,143 @@ normalize_req_account(Req0, Position) ->
 public_account(Account) ->
     Public = Account#{open_executor_pid => pid_of(maps:get(open_executor, Account, undefined)),
                       close_executor_pid => pid_of(maps:get(close_executor, Account, undefined)),
-                      token_configured_exchanges => maps:keys(maps:get(exchange_tokens, Account, #{}))},
+                      token_configured_exchanges => maps:keys(maps:get(exchange_tokens, Account, #{})),
+                      exchange_snapshot_count => maps:size(maps:get(exchange_snapshots, Account, #{}))},
     maps:without([raw, exchange_tokens], Public).
+
+sync_live_pairs_to_close_executor(Account) ->
+    case maps:get(mode, Account, <<"paper">>) of
+        <<"live">> ->
+            Req = live_track_req(Account),
+            [gen_server:cast(maps:get(close_executor, Account), {track_position, Req, Position})
+             || Position <- paired_live_positions(Account)];
+        _ ->
+            ok
+    end.
+
+live_track_req(Account) ->
+    DefaultScan = application:get_env(arbiguard, default_scan, #{}),
+    arbiguard_calc:normalize_request(DefaultScan#{
+        account_mode => <<"live">>,
+        account_id => maps:get(id, Account, <<"live-main">>),
+        live_enabled => maps:get(live_enabled, Account, false),
+        exchange_tokens => maps:get(exchange_tokens, Account, #{}),
+        exchange_accounts => maps:get(exchange_accounts, Account, #{})
+    }).
+
+paired_live_positions(Account) ->
+    Positions = live_positions(Account),
+    BySymbol = group_by_symbol(Positions),
+    lists:append([pair_symbol_positions(Symbol, Ps, Account) || {Symbol, Ps} <- maps:to_list(BySymbol)]).
+
+live_positions(Account) ->
+    Snapshots = maps:get(exchange_snapshots, Account, #{}),
+    lists:append([maps:get(positions, Snapshot, []) || {_Exchange, Snapshot} <- maps:to_list(Snapshots)]).
+
+group_by_symbol(Positions) ->
+    lists:foldl(fun(Position, Acc) ->
+        Symbol = maps:get(symbol, Position, <<"">>),
+        case Symbol of
+            <<"">> -> Acc;
+            _ -> Acc#{Symbol => [Position | maps:get(Symbol, Acc, [])]}
+        end
+    end, #{}, Positions).
+
+pair_symbol_positions(Symbol, Positions, Account) ->
+    Longs = [P || P <- Positions, position_side(P) =:= <<"long">>, position_notional(P) > 0],
+    Shorts = [P || P <- Positions, position_side(P) =:= <<"short">>, position_notional(P) > 0],
+    pair_position_legs(Symbol, Longs, Shorts, Account).
+
+pair_position_legs(_Symbol, [], _Shorts, _Account) -> [];
+pair_position_legs(_Symbol, _Longs, [], _Account) -> [];
+pair_position_legs(Symbol, [Long | RestLongs], Shorts, Account) ->
+    case take_first_different_exchange(Long, Shorts) of
+        {ok, Short, Shorts1} ->
+            [position_pair(Symbol, Long, Short, Account) | pair_position_legs(Symbol, RestLongs, Shorts1, Account)];
+        none ->
+            pair_position_legs(Symbol, RestLongs, Shorts, Account)
+    end.
+
+take_first_different_exchange(Long, Shorts) ->
+    LongEx = maps:get(exchange, Long, <<"">>),
+    take_first_different_exchange(LongEx, Shorts, []).
+
+take_first_different_exchange(_LongEx, [], _Seen) ->
+    none;
+take_first_different_exchange(LongEx, [Short | Rest], Seen) ->
+    case maps:get(exchange, Short, <<"">>) =/= LongEx of
+        true -> {ok, Short, lists:reverse(Seen) ++ Rest};
+        false -> take_first_different_exchange(LongEx, Rest, [Short | Seen])
+    end.
+
+position_pair(Symbol, Long, Short, Account) ->
+    LongEx = maps:get(exchange, Long, <<"">>),
+    ShortEx = maps:get(exchange, Short, <<"">>),
+    LongQty = position_qty(Long),
+    ShortQty = position_qty(Short),
+    LongEntry = entry_price(Long),
+    ShortEntry = entry_price(Short),
+    Notional = min(position_notional(Long), position_notional(Short)),
+    ID = <<(maps:get(id, Account, <<"live-main">>))/binary, "|live|", Symbol/binary, "|", LongEx/binary, "|", ShortEx/binary>>,
+    #{id => ID,
+      position_id => ID,
+      account_mode => <<"live">>,
+      account_id => maps:get(id, Account, <<"live-main">>),
+      symbol => Symbol,
+      long_exchange => LongEx,
+      short_exchange => ShortEx,
+      long_entry_price => LongEntry,
+      short_entry_price => ShortEntry,
+      long_qty => LongQty,
+      short_qty => ShortQty,
+      notional => Notional,
+      notional_usdt => Notional,
+      leverage => max(position_leverage(Long), position_leverage(Short)),
+      funding_pnl => f(maps:get(funding_pnl, Long, 0), 0) + f(maps:get(funding_pnl, Short, 0), 0),
+      opened_at => min_positive_time(maps:get(opened_at, Long, 0), maps:get(opened_at, Short, 0)),
+      source => <<"live_account_bootstrap">>}.
+
+position_side(Position) ->
+    Side0 = string:lowercase(arbiguard_util:to_binary(
+        maps:get(side, Position, maps:get(position_side, Position, <<"">>)))),
+    case Side0 of
+        <<"short">> -> <<"short">>;
+        <<"sell">> -> <<"short">>;
+        _ ->
+            case f(maps:get(qty, Position, maps:get(position_amt, Position, maps:get(size, Position, 0))), 0) < 0 of
+                true -> <<"short">>;
+                false -> <<"long">>
+            end
+    end.
+
+position_qty(Position) ->
+    abs(f(maps:get(qty, Position, maps:get(position_amt, Position, maps:get(size, Position, 0))), 0)).
+
+entry_price(Position) ->
+    f(maps:get(entry_price, Position, maps:get(avg_entry_price, Position, maps:get(avgPx, Position, 0))), 0).
+
+position_notional(Position) ->
+    Explicit = f(maps:get(notional, Position, maps:get(notional_usdt, Position, 0)), 0),
+    case Explicit > 0 of
+        true -> Explicit;
+        false -> position_qty(Position) * entry_price(Position)
+    end.
+
+position_leverage(Position) ->
+    max(1.0, f(maps:get(leverage, Position, 1), 1)).
+
+min_positive_time(A0, B0) ->
+    A = arbiguard_util:to_int(A0, 0),
+    B = arbiguard_util:to_int(B0, 0),
+    case {A > 0, B > 0} of
+        {true, true} -> min(A, B);
+        {true, false} -> A;
+        {false, true} -> B;
+        _ -> arbiguard_util:now_ms()
+    end.
+
+f(V, D) ->
+    arbiguard_util:to_float(V, D).
 
 pid_of(Name) when is_atom(Name) ->
     case whereis(Name) of undefined -> undefined; Pid -> list_to_binary(pid_to_list(Pid)) end;
