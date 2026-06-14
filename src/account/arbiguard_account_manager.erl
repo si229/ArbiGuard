@@ -5,7 +5,7 @@
          open_executor/1, close_executor/1, notify_opportunities/2,
          track_position/2, report_order_event/3,
          report_funding_settlement/3, set_live_enabled/2, set_exchange_token/3,
-         get_exchange_token/2, submit_live_order/2, test_order/1]).
+         get_exchange_token/2, test_order/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {accounts = #{}}).
@@ -58,9 +58,6 @@ get_exchange_token(AccountID, ExchangeID) ->
         {ok, _Account} -> arbiguard_exchange_account:get_token(AccountID, ExchangeID);
         _ -> undefined
     end.
-
-submit_live_order(Req, Order) ->
-    gen_server:call(?MODULE, {submit_live_order, Req, Order}).
 
 test_order(Payload) ->
     gen_server:call(?MODULE, {test_order, Payload}, 30000).
@@ -115,28 +112,6 @@ handle_call({set_exchange_token, AccountID0, ExchangeID0, Token0}, _From, State 
              State#state{accounts = Accounts1#{AccountID => Account1}}};
         {error, Reason} ->
             {reply, #{ok => false, reason => Reason, account_id => AccountID, exchange => ExchangeID}, State}
-    end;
-handle_call({submit_live_order, Req0, Order0}, _From, State = #state{accounts = Accounts}) ->
-    Req = normalize_req_account(Req0, Order0),
-    AccountID = maps:get(account_id, Req),
-    case maps:get(AccountID, Accounts, undefined) of
-        undefined ->
-            {reply, rejected_live_order(Req, Order0, <<"account_not_found">>), State};
-        Account ->
-            Order = Order0#{submitted_at => arbiguard_util:now_ms(),
-                            account_id => AccountID,
-                            account_mode => <<"live">>,
-                            requested_notional => maps:get(target_notional, Order0, maps:get(requested_notional, Order0, 0.0)),
-                            filled_notional => maps:get(filled_notional, Order0, 0.0)},
-            case maps:get(live_enabled, Account, false) of
-                true ->
-                    {reply, Order#{id => maps:get(id, Order, order_id(Order)),
-                                   status => <<"awaiting_fill">>,
-                                   adapter_status => <<"pending_adapter">>,
-                                   reason => <<"waiting_exchange_fill_report">>}, State};
-                false ->
-                    {reply, rejected_live_order(Req, Order, <<"live_account_disabled">>), State}
-            end
     end;
 handle_call({test_order, Payload0}, _From, State = #state{accounts = Accounts}) ->
     Payload = normalize_test_payload(Payload0),
@@ -345,21 +320,6 @@ truthy(_) -> false.
 
 ensure_map(Map) when is_map(Map) -> Map;
 ensure_map(_) -> #{}.
-
-rejected_live_order(Req, Order0, Reason) ->
-    Order = Order0#{id => maps:get(id, Order0, order_id(Order0)),
-                    account_id => maps:get(account_id, Req, <<"live-main">>),
-                    account_mode => <<"live">>,
-                    status => <<"rejected">>,
-                    reason => Reason,
-                    submitted_at => arbiguard_util:now_ms()},
-    maps:without([owner_pid, req, opportunity, position], Order).
-
-order_id(Order) ->
-    Symbol = maps:get(symbol, Order, <<"UNKNOWN">>),
-    Long = maps:get(long_exchange, Order, <<"long">>),
-    Short = maps:get(short_exchange, Order, <<"short">>),
-    <<Symbol/binary, "|", Long/binary, "|", Short/binary, "|", (integer_to_binary(arbiguard_util:now_ms()))/binary>>.
 
 normalize_test_payload(Payload0) ->
     Payload = ensure_map(Payload0),

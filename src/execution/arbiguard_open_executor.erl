@@ -328,7 +328,7 @@ submit_live_child_order(Req, Order, AwaitingStatus) ->
                         target_notional => BatchNotional,
                         requested_notional => BatchNotional},
     register_live_order_owner(Req, ChildOrder),
-    LiveResult = catch arbiguard_account_manager:submit_live_order(Req, ChildOrder),
+    LiveResult = catch arbiguard_live_order:submit_open(Req, ChildOrder),
     case live_submit_accepted(LiveResult) of
         true ->
             Pending0 = maps:get(pending_submissions, Order, #{}),
