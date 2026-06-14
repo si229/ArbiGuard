@@ -202,12 +202,15 @@ default_live_config() ->
 normalize_config(Config0) when is_map(Config0) ->
     Mode = norm_mode(maps:get(mode, Config0, <<"live">>)),
     DefaultID = <<Mode/binary, "-", (integer_to_binary(arbiguard_util:now_ms()))/binary>>,
-    Exchanges = [norm_exchange(E) || E <- maps:get(exchanges, Config0, [])],
+    Tokens = normalize_exchange_tokens(map_get_any(exchange_tokens, Config0, #{})),
+    Exchanges0 = [norm_exchange(E) || E <- map_get_any(exchanges, Config0, [])],
+    Exchanges = lists:usort(Exchanges0 ++ maps:keys(Tokens)),
     #{id => norm_account_id(maps:get(id, Config0, DefaultID)),
       mode => Mode,
       name => arbiguard_util:to_binary(maps:get(name, Config0, <<"">>)),
       exchanges => Exchanges,
-      exchange_tokens => normalize_exchange_tokens(maps:get(exchange_tokens, Config0, #{})),
+      live_enabled => truthy(map_get_any(live_enabled, Config0, false)),
+      exchange_tokens => Tokens,
       raw => Config0};
 normalize_config(_) ->
     normalize_config(#{}).
@@ -218,6 +221,7 @@ start_account_workers(Config) ->
     OpenName = arbiguard_open_executor:account_name(AccountID),
     CloseName = arbiguard_close_executor:account_name(AccountID),
     {ExchangeAccounts, ExchangeLog} = start_exchange_accounts(AccountID, maps:get(exchanges, Config, [])),
+    apply_initial_exchange_tokens(AccountID, maps:get(exchange_tokens, Config, #{})),
     Meta = executor_meta(Config, ExchangeAccounts),
     OpenLog = ensure_open_executor(OpenName, AccountID, Mode, Meta),
     CloseLog = ensure_close_executor(CloseName, AccountID, Mode, Meta),
@@ -258,6 +262,14 @@ start_exchange_accounts(AccountID, Exchanges) ->
          Log#{ExchangeID => #{account_process => Start, private_ws => PrivateStart}}}
     end, {#{}, #{}}, Exchanges).
 
+apply_initial_exchange_tokens(AccountID, Tokens) when is_map(Tokens) ->
+    maps:foreach(fun(ExchangeID, Token) ->
+        catch arbiguard_exchange_account:set_token(AccountID, ExchangeID, Token)
+    end, Tokens),
+    ok;
+apply_initial_exchange_tokens(_AccountID, _Tokens) ->
+    ok.
+
 exchange_config(ExchangeID) ->
     Exchanges = application:get_env(arbiguard, exchanges, arbiguard_calc:default_exchanges()),
     case [E || E <- Exchanges, norm_exchange(maps:get(id, E, <<"">>)) =:= norm_exchange(ExchangeID)] of
@@ -285,6 +297,31 @@ ensure_account_exchange(AccountID, ExchangeID, Accounts) ->
 add_exchange_to_account(Account, ExchangeID) ->
     Account#{exchanges => lists:usort([ExchangeID | maps:get(exchanges, Account, [])])}.
 
+executor_meta(AccountOrConfig, ExchangeAccounts) ->
+    #{account_id => maps:get(id, AccountOrConfig, <<"paper-main">>),
+      account_mode => maps:get(mode, AccountOrConfig, <<"paper">>),
+      live_enabled => maps:get(live_enabled, AccountOrConfig, false),
+      exchange_accounts => ExchangeAccounts,
+      exchange_tokens => maps:get(exchange_tokens, AccountOrConfig, #{})}.
+
+with_account_meta(Req, Account) ->
+    Meta = executor_meta(Account, maps:get(exchange_accounts, Account, #{})),
+    maps:merge(Req, Meta).
+
+broadcast_executor_meta(Account) ->
+    Meta = executor_meta(Account, maps:get(exchange_accounts, Account, #{})),
+    cast_executor_meta(maps:get(open_executor, Account, undefined), Meta),
+    cast_executor_meta(maps:get(close_executor, Account, undefined), Meta),
+    ok.
+
+cast_executor_meta(Name, Meta) when is_atom(Name) ->
+    case whereis(Name) of
+        undefined -> ok;
+        Pid -> gen_server:cast(Pid, {account_meta, Meta})
+    end;
+cast_executor_meta(_Name, _Meta) ->
+    ok.
+
 normalize_req_account(Req) ->
     normalize_req_account(Req, #{}).
 
@@ -296,8 +333,10 @@ normalize_req_account(Req0, Position) ->
          account_id => norm_account_id(maps:get(account_id, Req, maps:get(account_id, Position, DefaultID)))}.
 
 public_account(Account) ->
-    maps:without([raw], Account#{open_executor_pid => pid_of(maps:get(open_executor, Account, undefined)),
-                                 close_executor_pid => pid_of(maps:get(close_executor, Account, undefined))}).
+    Public = Account#{open_executor_pid => pid_of(maps:get(open_executor, Account, undefined)),
+                      close_executor_pid => pid_of(maps:get(close_executor, Account, undefined)),
+                      token_configured_exchanges => maps:keys(maps:get(exchange_tokens, Account, #{}))},
+    maps:without([raw, exchange_tokens], Public).
 
 pid_of(Name) when is_atom(Name) ->
     case whereis(Name) of undefined -> undefined; Pid -> list_to_binary(pid_to_list(Pid)) end;
@@ -327,6 +366,28 @@ truthy(_) -> false.
 
 ensure_map(Map) when is_map(Map) -> Map;
 ensure_map(_) -> #{}.
+
+normalize_exchange_tokens(Tokens0) when is_map(Tokens0) ->
+    maps:fold(fun(ExchangeID0, Token0, Acc) ->
+        ExchangeID = norm_exchange(ExchangeID0),
+        Token = normalize_exchange_token(Token0),
+        case Token of
+            #{} -> Acc;
+            _ -> Acc#{ExchangeID => Token}
+        end
+    end, #{}, Tokens0);
+normalize_exchange_tokens(_) ->
+    #{}.
+
+normalize_exchange_token(Token0) ->
+    maps:without([account_id, <<"account_id">>, exchange, <<"exchange">>], ensure_map(Token0)).
+
+map_get_any(Key, Map, Default) when is_atom(Key), is_map(Map) ->
+    maps:get(Key, Map, maps:get(atom_to_binary(Key, utf8), Map, Default));
+map_get_any(Key, Map, Default) when is_binary(Key), is_map(Map) ->
+    maps:get(Key, Map, maps:get(binary_to_existing_atom(Key, utf8), Map, Default));
+map_get_any(_Key, _Map, Default) ->
+    Default.
 
 normalize_test_payload(Payload0) ->
     Payload = ensure_map(Payload0),
