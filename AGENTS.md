@@ -2,8 +2,8 @@
 
 ## GitHub 唯一托管规则
 
-- 本机可修改的项目仓库只保留 GitHub fetch、push URL，不得自动添加或恢复 Gitee 镜像；活动依赖配置和锁文件不再使用 Gitee。
-- 现有 `push-all.ps1` 保持原样，保留其他机器按既有配置推送双端或多个远端的能力。
+- 本机可修改的项目仓库只保留 GitHub fetch、push URL，不得添加或恢复 Gitee 等其他镜像远程；活动依赖配置和锁文件只使用 GitHub。
+- 各工程的 `push-all.ps1`（有 `scripts/` 目录的放在 `scripts/`，否则放仓库根目录）只推当前分支、不强推，推完取回并核对远端；`game_wz_ops/scripts/sync-sibling-repos.ps1` 先对各工程 `git pull --ff-only`，再逐个调用它。新建工程时一并补上这个脚本。
 - 切换依赖托管地址时保留已锁定的准确提交并确认 GitHub 可获取，不借此升级业务依赖或重写历史。
 - Git 操作使用非交互方式；凭据不可用时报告明确失败，不触发登录弹窗。远端权限仍遵循当前任务授权，三个既定只读参考仓库保持排除。
 
